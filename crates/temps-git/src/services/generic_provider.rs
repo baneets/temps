@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, PullRequest, Repository, RepositoryPage, User, WebhookConfig,
+    GitProviderType, PullRequest, RepoDirEntry, Repository, RepositoryPage, User, WebhookConfig,
 };
 use async_trait::async_trait;
 
@@ -174,6 +174,18 @@ impl GitProviderService for GenericProvider {
         _owner: &str,
         _repo: &str,
     ) -> Result<Vec<GitProviderTag>, GitProviderError> {
+        Err(GitProviderError::NotImplemented)
+    }
+
+    /// Not implemented — Generic providers have no REST API to browse the tree.
+    async fn list_directory(
+        &self,
+        _access_token: &str,
+        _owner: &str,
+        _repo: &str,
+        _path: &str,
+        _reference: Option<&str>,
+    ) -> Result<Vec<RepoDirEntry>, GitProviderError> {
         Err(GitProviderError::NotImplemented)
     }
 

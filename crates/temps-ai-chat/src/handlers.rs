@@ -24,9 +24,13 @@ use utoipa::{OpenApi, ToSchema};
 use temps_auth::{deny_deployment_token, permission_guard, project_scope_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
 use temps_core::{AuditContext, AuditLogger, RequestMetadata};
-use temps_entities::{ai_conversations, ai_messages};
+use temps_entities::{ai_conversations, ai_messages, ai_pending_actions};
 
-use crate::audit::{ChatMessageSentAudit, ConversationArchivedAudit, ConversationCreatedAudit};
+use crate::audit::{
+    AiActionConfirmedAudit, AiActionRejectedAudit, ChatMessageSentAudit, ConversationArchivedAudit,
+    ConversationCreatedAudit, ConversationRenamedAudit,
+};
+use crate::pending_actions::{PendingActionError, PendingActionService};
 use crate::service::ChatStreamEvent;
 use crate::{ChatError, ConversationService};
 
@@ -36,6 +40,8 @@ pub struct AppState {
     pub db: Arc<DatabaseConnection>,
     /// Audit logger for write operations (best-effort; never fails a request).
     pub audit_service: Arc<dyn AuditLogger>,
+    /// Pending-action service (confirm/reject write proposals).
+    pub pending_actions: Arc<PendingActionService>,
 }
 
 impl AppState {
@@ -174,6 +180,12 @@ pub struct FindConversationQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct RenameConversationRequest {
+    /// New human-facing title. Trimmed; must be non-empty after trimming.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
     pub content: String,
     /// Optional, client-supplied description of the page/entity the user is
@@ -229,11 +241,144 @@ impl From<ChatError> for Problem {
     }
 }
 
-/// Toggle-only gate: the project must have opted into AI debug chat
-/// (`ai_debug_chat_enabled == Some(true)`). Used by the read/archive handlers so
-/// that disabling the feature consistently revokes access (returns 403) to
-/// existing chat content — reading or archiving history must not require an AI
-/// provider to be configured, only the per-project toggle.
+impl From<PendingActionError> for Problem {
+    fn from(e: PendingActionError) -> Self {
+        match e {
+            PendingActionError::NotFound { .. } => {
+                problemdetails::new(axum::http::StatusCode::NOT_FOUND)
+                    .with_title("Pending Action Not Found")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::InvalidState { .. } => {
+                problemdetails::new(axum::http::StatusCode::CONFLICT)
+                    .with_title("Invalid Action State")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::StepBlocked { .. } => {
+                problemdetails::new(axum::http::StatusCode::CONFLICT)
+                    .with_title("Plan Step Not Ready")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::PermissionDenied { .. } => {
+                problemdetails::new(axum::http::StatusCode::FORBIDDEN)
+                    .with_title("Permission Denied")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Disabled { .. } => {
+                problemdetails::new(axum::http::StatusCode::FORBIDDEN)
+                    .with_title("AI Write Actions Disabled")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Unavailable => {
+                problemdetails::new(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                    .with_title("Write Actions Unavailable")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Execution { .. } => {
+                problemdetails::new(axum::http::StatusCode::BAD_GATEWAY)
+                    .with_title("Execution Failed")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Database(_) => {
+                problemdetails::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail(e.to_string())
+            }
+        }
+    }
+}
+
+/// Scrub top-level object keys that may carry sensitive values.
+///
+/// Any key whose name (case-insensitive) is or contains one of:
+/// `value`, `secret`, `password`, `token`, `key`
+/// has its value replaced with `"***"`. Structural fields
+/// (`operation`, `method`, `summary`, etc.) are left intact.
+/// Non-object values are returned unchanged.
+fn redact_params(v: &serde_json::Value) -> serde_json::Value {
+    const SENSITIVE: &[&str] = &["value", "secret", "password", "token", "key"];
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return v.clone(),
+    };
+    let redacted: serde_json::Map<String, serde_json::Value> = obj
+        .iter()
+        .map(|(k, val)| {
+            let lower = k.to_ascii_lowercase();
+            let is_sensitive = SENSITIVE.iter().any(|s| lower.contains(s));
+            if is_sensitive {
+                (k.clone(), serde_json::Value::String("***".to_string()))
+            } else {
+                (k.clone(), val.clone())
+            }
+        })
+        .collect();
+    serde_json::Value::Object(redacted)
+}
+
+// --- Pending-action DTO ------------------------------------------------------
+
+/// A proposed AI write action awaiting human confirmation.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PendingActionResponse {
+    pub public_id: String,
+    pub operation_id: String,
+    pub method: String,
+    pub summary: String,
+    pub status: String,
+    /// Set when this action is one step of a multi-step plan (chained actions);
+    /// all steps of the plan share this id. Absent for standalone single actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_public_id: Option<String>,
+    /// 0-based order of this step within its plan (0 for standalone actions).
+    pub step_index: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_permission: Option<String>,
+    /// The flat params to be replayed at execute time (shown pre-execution for review).
+    pub params: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_at: Option<String>,
+}
+
+impl From<ai_pending_actions::Model> for PendingActionResponse {
+    fn from(m: ai_pending_actions::Model) -> Self {
+        Self {
+            public_id: m.public_id,
+            operation_id: m.operation_id,
+            method: m.method,
+            summary: m.summary,
+            status: m.status,
+            plan_public_id: m.plan_public_id,
+            step_index: m.step_index,
+            required_permission: m.required_permission,
+            // Scrub sensitive values (e.g. env-var values) before returning to
+            // clients who may only hold a broad read permission.
+            params: redact_params(&m.params),
+            result: m.result,
+            error: m.error,
+            created_at: m.created_at.to_rfc3339(),
+            confirmed_at: m.confirmed_at.map(|t| t.to_rfc3339()),
+            executed_at: m.executed_at.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
+/// Toggle-only gate: the project must have opted into AI use — either the
+/// read-only debug chat (`ai_debug_chat_enabled`) OR write actions
+/// (`ai_write_actions_enabled`). Write actions are *proposed and confirmed
+/// inside this chat*, so enabling the more-privileged capability must never
+/// block the chat itself (otherwise a project with write on but debug-chat off
+/// could never open the chat to use it). Used by the read/archive handlers so
+/// that disabling both consistently revokes access (403) to existing chat
+/// content — reading/archiving history must not require an AI provider to be
+/// configured, only a per-project opt-in.
 async fn ensure_chat_enabled(db: &DatabaseConnection, project_id: i32) -> Result<(), Problem> {
     let project = temps_entities::projects::Entity::find_by_id(project_id)
         .one(db)
@@ -242,11 +387,13 @@ async fn ensure_chat_enabled(db: &DatabaseConnection, project_id: i32) -> Result
             problemdetails::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
                 .with_detail(e.to_string())
         })?;
-    let enabled = matches!(project.and_then(|p| p.ai_debug_chat_enabled), Some(true));
+    let enabled = project
+        .map(|p| matches!(p.ai_debug_chat_enabled, Some(true)) || p.ai_write_actions_enabled)
+        .unwrap_or(false);
     if !enabled {
         return Err(problemdetails::new(axum::http::StatusCode::FORBIDDEN)
-            .with_title("AI Debug Chat Disabled")
-            .with_detail("Enable AI debug chat for this project to use it."));
+            .with_title("AI Chat Disabled")
+            .with_detail("Enable AI chat for this project to use it."));
     }
     Ok(())
 }
@@ -271,6 +418,8 @@ const MAX_CONTEXT_ID_LEN: usize = 128;
 const MAX_MESSAGE_CONTENT_LEN: usize = 32_000;
 /// Cap on the advisory `page_context` (well under a message; it's framing).
 const MAX_PAGE_CONTEXT_LEN: usize = 4_000;
+/// Cap on a user-supplied conversation title (a short label, not prose).
+const MAX_TITLE_LEN: usize = 200;
 
 /// 400 for an over-length input field.
 fn too_long(field: &str, max: usize) -> Problem {
@@ -597,6 +746,225 @@ pub async fn archive_conversation(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Rename a conversation (set its human-facing title).
+#[utoipa::path(
+    patch, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/conversations/{public_id}",
+    params(("project_id" = i32, Path,), ("public_id" = String, Path,)),
+    request_body = RenameConversationRequest,
+    responses((status = 200, body = ConversationResponse), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("bearer_auth" = []))
+)]
+pub async fn rename_conversation(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, public_id)): Path<(i32, String)>,
+    Json(req): Json<RenameConversationRequest>,
+) -> Result<Json<ConversationResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err(problemdetails::new(axum::http::StatusCode::BAD_REQUEST)
+            .with_title("Invalid Title")
+            .with_detail("Conversation title cannot be empty."));
+    }
+    if title.len() > MAX_TITLE_LEN {
+        return Err(too_long("title", MAX_TITLE_LEN));
+    }
+
+    let conv = state
+        .service
+        .get_by_public_id(project_id, &public_id)
+        .await?;
+    let updated = state.service.rename(&conv, title).await?;
+
+    state
+        .audit(&ConversationRenamedAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            project_id,
+            conversation_id: updated.public_id.clone(),
+            title: title.to_string(),
+        })
+        .await;
+
+    Ok(Json(ConversationResponse::from(updated)))
+}
+
+// --- Pending-action handlers -------------------------------------------------
+
+/// List all pending actions for a conversation (most-recently-proposed first).
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/conversations/{public_id}/pending-actions",
+    params(
+        ("project_id" = i32, Path,),
+        ("public_id" = String, Path, description = "Conversation public id"),
+    ),
+    responses(
+        (status = 200, body = Vec<PendingActionResponse>),
+        (status = 401), (status = 403), (status = 404)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_pending_actions(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path((project_id, conv_public_id)): Path<(i32, String)>,
+) -> Result<Json<Vec<PendingActionResponse>>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    // Verify conversation exists + is scoped to this project.
+    let conv = state
+        .service
+        .get_by_public_id(project_id, &conv_public_id)
+        .await?;
+    let rows = state
+        .pending_actions
+        .list_for_conversation(project_id, conv.id)
+        .await
+        .map_err(Problem::from)?;
+    Ok(Json(
+        rows.into_iter().map(PendingActionResponse::from).collect(),
+    ))
+}
+
+/// Get a single pending action by its public id (scoped to the project).
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let action = state
+        .pending_actions
+        .get(project_id, &action_public_id)
+        .await
+        .map_err(Problem::from)?;
+    Ok(Json(PendingActionResponse::from(action)))
+}
+
+/// Confirm a proposed AI action: validate permission, atomically claim, execute,
+/// persist outcome. The execution uses the CONFIRMING user's auth — never the model's.
+#[utoipa::path(
+    post, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404), (status = 409), (status = 503)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn confirm_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let confirmed_by = Some(auth.user_id());
+    let updated = state
+        .pending_actions
+        .confirm(project_id, &action_public_id, &auth, confirmed_by)
+        .await
+        .map_err(Problem::from)?;
+
+    // Audit is also emitted inside the service, but we emit here with full
+    // metadata (ip_address, user_agent) for the HTTP-layer record.
+    let audit = AiActionConfirmedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        action_id: updated.public_id.clone(),
+        operation_id: updated.operation_id.clone(),
+        status: updated.status.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to write ai.pending_action.confirmed audit log: {e}");
+    }
+
+    Ok(Json(PendingActionResponse::from(updated)))
+}
+
+/// Reject a proposed AI action (no execution). Status transitions to "rejected".
+#[utoipa::path(
+    post, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}/reject",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404), (status = 409)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn reject_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let rejected_by = Some(auth.user_id());
+    let updated = state
+        .pending_actions
+        .reject(project_id, &action_public_id, &auth, rejected_by)
+        .await
+        .map_err(Problem::from)?;
+
+    let audit = AiActionRejectedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        action_id: updated.public_id.clone(),
+        operation_id: updated.operation_id.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to write ai.pending_action.rejected audit log: {e}");
+    }
+
+    Ok(Json(PendingActionResponse::from(updated)))
+}
+
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         // Unified cross-project switcher.
@@ -613,7 +981,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}",
-            get(get_conversation),
+            get(get_conversation).patch(rename_conversation),
         )
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}/messages",
@@ -622,6 +990,23 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}/archive",
             post(archive_conversation),
+        )
+        // Pending-action routes (propose-then-confirm write actions).
+        .route(
+            "/projects/{project_id}/ai/conversations/{public_id}/pending-actions",
+            get(list_pending_actions),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}",
+            get(get_pending_action),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm",
+            post(confirm_pending_action),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}/reject",
+            post(reject_pending_action),
         )
 }
 
@@ -635,6 +1020,11 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_conversation,
         send_message,
         archive_conversation,
+        rename_conversation,
+        list_pending_actions,
+        get_pending_action,
+        confirm_pending_action,
+        reject_pending_action,
     ),
     components(schemas(
         ConversationResponse,
@@ -644,9 +1034,11 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         MessagePart,
         ConversationDetailResponse,
         CreateConversationRequest,
+        RenameConversationRequest,
         SendMessageRequest,
         ToolCallEvent,
         ToolResultEvent,
+        PendingActionResponse,
     ))
 )]
 pub struct AiChatApiDoc;
@@ -739,6 +1131,7 @@ mod tests {
             attack_mode: false,
             ai_alert_summaries_enabled: None,
             ai_debug_chat_enabled: toggle,
+            ai_write_actions_enabled: false,
             enable_preview_environments: false,
             preview_envs_on_demand: false,
             preview_envs_idle_timeout_seconds: 300,
@@ -767,6 +1160,22 @@ mod tests {
     async fn test_ensure_chat_enabled_allows_when_toggle_on() {
         let db = db_returning(Some(project_with_toggle(7, Some(true))));
         assert!(ensure_chat_enabled(&db, 7).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_allows_when_write_actions_on_even_if_chat_off() {
+        // Write actions are proposed + confirmed inside the chat, so enabling
+        // them must never leave the chat itself unreachable, regardless of the
+        // read-only debug-chat toggle (off or NULL).
+        for chat_toggle in [None, Some(false)] {
+            let mut p = project_with_toggle(7, chat_toggle);
+            p.ai_write_actions_enabled = true;
+            let db = db_returning(Some(p));
+            assert!(
+                ensure_chat_enabled(&db, 7).await.is_ok(),
+                "write actions on must allow the chat (chat toggle {chat_toggle:?})"
+            );
+        }
     }
 
     #[tokio::test]
@@ -811,4 +1220,122 @@ mod tests {
     // crate-specific toggle gate (above), the input-length gate, the service-
     // layer scoping (see service.rs tests), and the HTTP error mapping via the
     // pure `From<ChatError>` conversion.
+
+    // ── PendingActionError → Problem mapping ─────────────────────────────────
+
+    #[test]
+    fn test_pending_action_not_found_maps_to_404() {
+        let p: Problem = PendingActionError::NotFound {
+            public_id: "abc".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(title_of(&p).as_deref(), Some("Pending Action Not Found"));
+    }
+
+    #[test]
+    fn test_pending_action_invalid_state_maps_to_409() {
+        let p: Problem = PendingActionError::InvalidState {
+            public_id: "abc".to_string(),
+            status: "executed".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::CONFLICT);
+        assert_eq!(title_of(&p).as_deref(), Some("Invalid Action State"));
+    }
+
+    #[test]
+    fn test_pending_action_permission_denied_maps_to_403() {
+        let p: Problem = PendingActionError::PermissionDenied {
+            permission: "deployments:write".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::FORBIDDEN);
+        assert_eq!(title_of(&p).as_deref(), Some("Permission Denied"));
+    }
+
+    #[test]
+    fn test_pending_action_disabled_maps_to_403() {
+        let p: Problem = PendingActionError::Disabled { project_id: 7 }.into();
+        assert_eq!(p.status_code, StatusCode::FORBIDDEN);
+        assert_eq!(title_of(&p).as_deref(), Some("AI Write Actions Disabled"));
+    }
+
+    #[test]
+    fn test_pending_action_unavailable_maps_to_503() {
+        let p: Problem = PendingActionError::Unavailable.into();
+        assert_eq!(p.status_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(title_of(&p).as_deref(), Some("Write Actions Unavailable"));
+    }
+
+    #[test]
+    fn test_pending_action_database_error_maps_to_500() {
+        let p: Problem =
+            PendingActionError::Database(sea_orm::DbErr::Custom("boom".to_string())).into();
+        assert_eq!(p.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(title_of(&p).as_deref(), Some("Internal Server Error"));
+    }
+
+    // ── redact_params ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_redact_params_masks_sensitive_keys() {
+        let params = serde_json::json!({
+            "name": "MY_SECRET",
+            "value": "super-secret",
+            "secret": "also-secret",
+            "password": "p@ssword",
+            "token": "tok_abc",
+            "key": "k123",
+            "operation": "update",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["name"], serde_json::json!("MY_SECRET"));
+        assert_eq!(redacted["operation"], serde_json::json!("update"));
+        assert_eq!(redacted["value"], serde_json::json!("***"));
+        assert_eq!(redacted["secret"], serde_json::json!("***"));
+        assert_eq!(redacted["password"], serde_json::json!("***"));
+        assert_eq!(redacted["token"], serde_json::json!("***"));
+        assert_eq!(redacted["key"], serde_json::json!("***"));
+    }
+
+    #[test]
+    fn test_redact_params_masks_keys_containing_sensitive_substrings() {
+        let params = serde_json::json!({
+            "api_key": "my-api-key",
+            "access_token": "tok",
+            "db_password": "hunter2",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["api_key"], serde_json::json!("***"));
+        assert_eq!(redacted["access_token"], serde_json::json!("***"));
+        assert_eq!(redacted["db_password"], serde_json::json!("***"));
+    }
+
+    #[test]
+    fn test_redact_params_non_object_passthrough() {
+        let arr = serde_json::json!([1, 2, 3]);
+        assert_eq!(redact_params(&arr), arr);
+        let s = serde_json::json!("hello");
+        assert_eq!(redact_params(&s), s);
+        let n = serde_json::json!(42);
+        assert_eq!(redact_params(&n), n);
+    }
+
+    #[test]
+    fn test_redact_params_empty_object_passthrough() {
+        let empty = serde_json::json!({});
+        assert_eq!(redact_params(&empty), empty);
+    }
+
+    #[test]
+    fn test_redact_params_case_insensitive() {
+        let params = serde_json::json!({
+            "VALUE": "sensitive",
+            "Secret": "also-sensitive",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["VALUE"], serde_json::json!("***"));
+        assert_eq!(redacted["Secret"], serde_json::json!("***"));
+    }
 }

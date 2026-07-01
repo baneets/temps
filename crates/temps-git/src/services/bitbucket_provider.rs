@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, PullRequest, Repository, RepositoryPage, User, WebhookConfig,
+    GitProviderType, PullRequest, RepoDirEntry, Repository, RepositoryPage, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -773,6 +773,110 @@ impl GitProviderService for BitbucketProvider {
             // Bitbucket returns content as raw text, not base64.
             encoding: "plain".to_string(),
         })
+    }
+
+    async fn list_directory(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        reference: Option<&str>,
+    ) -> Result<Vec<RepoDirEntry>, GitProviderError> {
+        let client = self.get_client();
+
+        // The `src` endpoint needs a node (branch/tag/commit). Bitbucket has no
+        // "default ref" shortcut that also accepts a path, so resolve the repo's
+        // main branch when the caller didn't pin a reference.
+        let node = match reference {
+            Some(r) => r.to_string(),
+            None => {
+                self.get_repository(access_token, owner, repo)
+                    .await?
+                    .default_branch
+            }
+        };
+
+        // Percent-encode each path segment individually so `/` separators are
+        // preserved but user-supplied characters can't break the URL.
+        let encoded_path = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|segment| urlencoding::encode(segment).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+
+        // GET {api}/repositories/{owner}/{repo}/src/{node}/{path} — paginated.
+        let mut next_url = Some(format!(
+            "{}/repositories/{}/{}/src/{}/{}?pagelen=100",
+            API_BASE,
+            owner,
+            repo,
+            urlencoding::encode(&node),
+            encoded_path
+        ));
+
+        #[derive(Deserialize)]
+        struct BitbucketSrcItem {
+            // "commit_directory" or "commit_file".
+            #[serde(rename = "type")]
+            item_type: String,
+            path: String,
+            size: Option<u64>,
+        }
+
+        let mut entries: Vec<RepoDirEntry> = Vec::new();
+        // Bound pagination so a pathological repo can't loop forever.
+        let mut pages_left = 50;
+        while let Some(url) = next_url.take() {
+            if pages_left == 0 {
+                break;
+            }
+            pages_left -= 1;
+
+            let response = self
+                .send_with_retry(|| self.apply_auth(client.get(&url)))
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(GitProviderError::ApiError(format!(
+                    "Failed to list directory '{path}' in {owner}/{repo}: {}",
+                    response.status()
+                )));
+            }
+
+            let page: BitbucketPage<BitbucketSrcItem> = response.json().await.map_err(|e| {
+                GitProviderError::ApiError(format!(
+                    "Failed to parse directory listing for '{path}' in {owner}/{repo}: {e}"
+                ))
+            })?;
+
+            for item in page.values {
+                let is_dir = item.item_type == "commit_directory";
+                // Bitbucket returns repo-relative paths; the display name is the
+                // final segment (trailing slash on dirs is already absent).
+                let name = item
+                    .path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&item.path)
+                    .to_string();
+                let size = if is_dir { None } else { item.size };
+                entries.push(RepoDirEntry {
+                    name,
+                    path: item.path,
+                    is_dir,
+                    size,
+                });
+            }
+
+            next_url = page.next;
+        }
+
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+        Ok(entries)
     }
 
     async fn get_latest_commit(

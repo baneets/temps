@@ -34,6 +34,15 @@ pub struct ConversationArchivedAudit {
     pub conversation_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ConversationRenamedAudit {
+    pub context: AuditContext,
+    pub project_id: i32,
+    pub conversation_id: String,
+    /// New human-facing title after the rename.
+    pub title: String,
+}
+
 macro_rules! impl_audit_operation {
     ($type:ty, $op:expr) => {
         impl AuditOperation for $type {
@@ -60,3 +69,28 @@ macro_rules! impl_audit_operation {
 impl_audit_operation!(ConversationCreatedAudit, "AI_CHAT_CONVERSATION_CREATED");
 impl_audit_operation!(ChatMessageSentAudit, "AI_CHAT_MESSAGE_SENT");
 impl_audit_operation!(ConversationArchivedAudit, "AI_CHAT_CONVERSATION_ARCHIVED");
+impl_audit_operation!(ConversationRenamedAudit, "AI_CHAT_CONVERSATION_RENAMED");
+
+// --- Pending-action audit events -------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiActionConfirmedAudit {
+    pub context: AuditContext,
+    pub project_id: i32,
+    /// Public id of the confirmed action.
+    pub action_id: String,
+    pub operation_id: String,
+    /// Final status (`"executed"` or `"failed"`).
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiActionRejectedAudit {
+    pub context: AuditContext,
+    pub project_id: i32,
+    pub action_id: String,
+    pub operation_id: String,
+}
+
+impl_audit_operation!(AiActionConfirmedAudit, "ai.pending_action.confirmed");
+impl_audit_operation!(AiActionRejectedAudit, "ai.pending_action.rejected");

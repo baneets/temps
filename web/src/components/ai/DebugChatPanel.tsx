@@ -2,23 +2,39 @@ import {
   createConversation,
   findConversation,
   getConversation,
+  getProject,
+  updateProjectSettings,
 } from '@/api/client'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Loader2,
   Paperclip,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Wrench,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -106,13 +122,14 @@ function assistantParts(m: ChatMessage): ChatPart[] {
 }
 
 /**
- * Human label for a tool card — what the tool actually did. For the `temps`
- * virtual CLI that's the command it ran (e.g. `traces get_trace --trace_id …`),
- * which is far more useful than four identical "temps" rows. Falls back to the
- * tool name for other tools or unparsable args.
+ * Human label for a tool card — what the tool actually did. For the `temps` and
+ * `temps_write` virtual CLIs that's the command it ran (e.g.
+ * `traces get_trace --trace_id …`, or `trigger_project_pipeline --environment_id 8`),
+ * which is far more useful than several identical "temps"/"temps_write" rows.
+ * Falls back to the tool name for other tools or unparsable args.
  */
 function toolLabel(tool: ToolCall): string {
-  if (tool.name === 'temps') {
+  if (tool.name === 'temps' || tool.name === 'temps_write') {
     try {
       const args = JSON.parse(tool.arguments) as { command?: unknown }
       if (typeof args.command === 'string' && args.command.trim()) {
@@ -204,6 +221,680 @@ function ToolCard({ tool }: { tool: ToolCall }) {
         </div>
       )}
     </div>
+  )
+}
+
+/** The proposal payload a `temps_write` tool result carries (JSON string). */
+interface Proposal {
+  action_id: string
+  operation: string
+  method: string
+  summary: string
+}
+
+/** Parse a `temps_write` tool result into a proposal, or null when it's help /
+ *  validation text (rendered as a plain tool card instead). */
+function parseProposal(result?: string | null): Proposal | null {
+  if (!result) return null
+  try {
+    const o = JSON.parse(result) as Partial<Proposal> & { status?: string }
+    if (o && o.status === 'proposed' && o.action_id && o.operation) {
+      return {
+        action_id: String(o.action_id),
+        operation: String(o.operation),
+        method: String(o.method ?? ''),
+        summary: String(o.summary ?? ''),
+      }
+    }
+  } catch {
+    /* not a proposal payload */
+  }
+  return null
+}
+
+/** Compose a chat message that hands a failed write action back to the AI with
+ *  everything it needs to diagnose and re-propose: the operation, the exact
+ *  params sent (already redacted server-side), and the error. */
+function buildFixMessage(
+  op: string,
+  method: string,
+  params: string | null,
+  error: string | null
+): string {
+  return [
+    'A write action I confirmed just FAILED. Diagnose the cause from the error ' +
+      'below and propose a corrected action (look up any wrong/missing ids with ' +
+      'the read tool first). Do not claim success.',
+    '',
+    `- Operation: \`${op}\``,
+    method ? `- Method: \`${method}\`` : '',
+    params && params !== '{}' ? `- Params sent: ${params}` : '',
+    error ? `- Error: ${error}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+const ACTION_STATUS: Record<string, { label: string; cls: string }> = {
+  proposed: { label: 'Awaiting your confirmation', cls: 'text-amber-600 dark:text-amber-400' },
+  executing: { label: 'Running…', cls: 'text-muted-foreground' },
+  executed: { label: 'Executed', cls: 'text-green-600 dark:text-green-400' },
+  failed: { label: 'Failed', cls: 'text-destructive' },
+  rejected: { label: 'Rejected', cls: 'text-muted-foreground' },
+  expired: { label: 'Expired', cls: 'text-muted-foreground' },
+}
+
+/**
+ * A write/modify/delete the AI has *proposed* — never executed. This card is the
+ * human gate: Confirm replays the mutation server-side (permission-checked +
+ * audited), Reject discards it. On mount it reconciles the live status from the
+ * API, so a reloaded chat shows executed/rejected instead of a stale prompt.
+ */
+function PendingActionCard({
+  projectId,
+  tool,
+  onFix,
+}: {
+  projectId: number
+  tool: ToolCall
+  /** Send a follow-up chat message (used by "Fix with AI" on failure). */
+  onFix?: (text: string) => void
+}) {
+  const proposal = parseProposal(tool.result)
+  const actionId = proposal?.action_id
+  const [status, setStatus] = useState('proposed')
+  const [busy, setBusy] = useState<'confirm' | 'reject' | null>(null)
+  const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  // The exact request params/body that will be sent, redacted server-side
+  // (value/secret/password/token/key → ***). Shown so the user can review what
+  // the action will actually do before confirming.
+  const [params, setParams] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+
+  // Reconcile the live status once the action id is known (covers reloads).
+  useEffect(() => {
+    if (!actionId) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/ai/pending-actions/${actionId}`, {
+      credentials: 'include',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return
+        if (typeof d.status === 'string') setStatus(d.status)
+        if (d.result != null) setResult(JSON.stringify(d.result))
+        if (typeof d.error === 'string') setError(d.error)
+        if (d.params != null) setParams(JSON.stringify(d.params))
+      })
+      .catch(() => {
+        /* status reconcile is best-effort */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, actionId])
+
+  // Still streaming the proposal, or not a proposal at all (help/validation
+  // text) — fall back to the ordinary tool card.
+  if (tool.result === undefined || !proposal) {
+    return <ToolCard tool={tool} />
+  }
+
+  const act = async (kind: 'confirm' | 'reject') => {
+    setBusy(kind)
+    setError(null)
+    try {
+      const r = await fetch(
+        `/api/projects/${projectId}/ai/pending-actions/${proposal.action_id}/${kind}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+      const d = await r.json().catch(() => null)
+      if (!r.ok) {
+        setError(
+          (d as { detail?: string } | null)?.detail ||
+            `Could not ${kind} the action.`
+        )
+      } else if (d) {
+        if (typeof d.status === 'string') setStatus(d.status)
+        if (d.result != null) setResult(JSON.stringify(d.result))
+        if (typeof d.error === 'string') setError(d.error)
+      }
+    } catch {
+      setError(`Could not ${kind} the action.`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const st = ACTION_STATUS[status] ?? ACTION_STATUS.proposed
+  const pending = status === 'proposed'
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs">
+      <div className="flex min-w-0 items-start gap-2 px-2.5 py-2">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] font-semibold uppercase">
+              {proposal.method}
+            </span>
+            <span className="min-w-0 truncate font-mono text-[11px] font-medium">
+              {proposal.operation}
+            </span>
+          </div>
+          {proposal.summary && (
+            <div className="text-muted-foreground">{proposal.summary}</div>
+          )}
+          <div className={cn('text-[11px] font-medium', st.cls)}>{st.label}</div>
+        </div>
+      </div>
+      {params && params !== '{}' && (
+        <div className="min-w-0 space-y-1 border-t border-amber-500/20 px-2.5 py-2">
+          <div className="font-medium text-muted-foreground">
+            {pending ? 'Will send' : 'Sent'}
+          </div>
+          <ToolBlock value={params} />
+        </div>
+      )}
+      {pending ? (
+        <div className="flex items-center gap-2 border-t border-amber-500/20 px-2.5 py-2">
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs"
+            disabled={busy !== null}
+            onClick={() => act('confirm')}
+          >
+            {busy === 'confirm' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+            Confirm &amp; run
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 px-2 text-xs"
+            disabled={busy !== null}
+            onClick={() => act('reject')}
+          >
+            {busy === 'reject' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <X className="h-3.5 w-3.5" />
+            )}
+            Reject
+          </Button>
+        </div>
+      ) : result || error ? (
+        <div className="space-y-1 border-t border-amber-500/20 px-2.5 py-2">
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="flex items-center gap-1 font-medium text-muted-foreground hover:text-foreground"
+          >
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+            {error ? 'Error' : 'Result'}
+          </button>
+          {open &&
+            (error ? (
+              <pre className={toolBlockClasses}>{error}</pre>
+            ) : (
+              <ToolBlock value={result ?? ''} />
+            ))}
+          {status === 'failed' && onFix && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-1 h-7 gap-1 px-2 text-xs"
+              onClick={() =>
+                onFix(
+                  buildFixMessage(proposal.operation, proposal.method, params, error)
+                )
+              }
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Fix with AI
+            </Button>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** One step of a multi-step plan proposal. */
+interface PlanStep {
+  action_id: string
+  operation: string
+  method: string
+  summary: string
+  step: number
+}
+
+interface PlanProposal {
+  plan_id: string | null
+  steps: PlanStep[]
+}
+
+/** Parse a `temps_write` tool result into a plan proposal, or null when it's a
+ *  single action / help text (handled elsewhere). */
+function parsePlanProposal(result?: string | null): PlanProposal | null {
+  if (!result) return null
+  try {
+    const o = JSON.parse(result) as {
+      status?: string
+      plan_id?: string
+      steps?: Array<Partial<PlanStep>>
+    }
+    if (o?.status === 'proposed_plan' && Array.isArray(o.steps)) {
+      const steps = o.steps
+        .map((s, i) => ({
+          action_id: String(s.action_id ?? ''),
+          operation: String(s.operation ?? ''),
+          method: String(s.method ?? ''),
+          summary: String(s.summary ?? ''),
+          step: Number(s.step ?? i + 1),
+        }))
+        .filter((s) => s.action_id)
+      if (steps.length > 0) {
+        return { plan_id: o.plan_id ? String(o.plan_id) : null, steps }
+      }
+    }
+  } catch {
+    /* not a plan payload */
+  }
+  return null
+}
+
+interface StepState {
+  status: string
+  result?: string | null
+  error?: string | null
+  params?: string | null
+}
+
+/**
+ * A multi-step *plan* the AI proposed (chained actions, e.g. "raise resources
+ * then redeploy"). Every step is shown up front, but steps run ONE AT A TIME in
+ * order: only the next un-run step is actionable, confirming it replays that one
+ * mutation server-side (permission-checked + audited), and a failed or rejected
+ * step halts the rest. Each step is its own pending-action row; this card just
+ * groups and sequences them.
+ */
+function PlanActionCard({
+  projectId,
+  plan,
+  onFix,
+}: {
+  projectId: number
+  plan: PlanProposal
+  /** Send a follow-up chat message (used by "Fix with AI" on a failed step). */
+  onFix?: (text: string) => void
+}) {
+  const [states, setStates] = useState<Record<string, StepState>>(() =>
+    Object.fromEntries(
+      plan.steps.map((s) => [s.action_id, { status: 'proposed' } as StepState])
+    )
+  )
+  const [busy, setBusy] = useState<string | null>(null)
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const fetchAll = useCallback(() => {
+    let cancelled = false
+    void Promise.all(
+      plan.steps.map((s) =>
+        fetch(`/api/projects/${projectId}/ai/pending-actions/${s.action_id}`, {
+          credentials: 'include',
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => [s.action_id, d] as const)
+          .catch(() => [s.action_id, null] as const)
+      )
+    ).then((pairs) => {
+      if (cancelled) return
+      setStates((prev) => {
+        const next = { ...prev }
+        for (const [id, d] of pairs) {
+          if (d)
+            next[id] = {
+              status: typeof d.status === 'string' ? d.status : 'proposed',
+              result: d.result != null ? JSON.stringify(d.result) : null,
+              error: typeof d.error === 'string' ? d.error : null,
+              params: d.params != null ? JSON.stringify(d.params) : null,
+            }
+        }
+        return next
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, plan])
+
+  useEffect(() => fetchAll(), [fetchAll])
+
+  const statuses = plan.steps.map(
+    (s) => states[s.action_id]?.status ?? 'proposed'
+  )
+  // The next actionable step: the first still-'proposed' step whose every
+  // predecessor has 'executed'. If a predecessor failed/rejected/skipped, the
+  // plan is halted and nothing is actionable.
+  let actionableIdx = -1
+  for (let i = 0; i < plan.steps.length; i++) {
+    if (statuses[i] === 'proposed') {
+      if (statuses.slice(0, i).every((st) => st === 'executed')) actionableIdx = i
+      break
+    }
+  }
+
+  const act = async (actionId: string, kind: 'confirm' | 'reject') => {
+    setBusy(actionId)
+    try {
+      const r = await fetch(
+        `/api/projects/${projectId}/ai/pending-actions/${actionId}/${kind}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+      const d = await r.json().catch(() => null)
+      setStates((prev) => ({
+        ...prev,
+        [actionId]: {
+          status:
+            typeof d?.status === 'string'
+              ? d.status
+              : (prev[actionId]?.status ?? 'proposed'),
+          result: d?.result != null ? JSON.stringify(d.result) : prev[actionId]?.result,
+          error: !r.ok
+            ? ((d as { detail?: string } | null)?.detail ??
+              `Could not ${kind} this step.`)
+            : typeof d?.error === 'string'
+              ? d.error
+              : prev[actionId]?.error,
+          params: prev[actionId]?.params,
+        },
+      }))
+    } catch {
+      setStates((prev) => ({
+        ...prev,
+        [actionId]: {
+          ...(prev[actionId] ?? { status: 'proposed' }),
+          error: `Could not ${kind} this step.`,
+        },
+      }))
+    } finally {
+      setBusy(null)
+      // Refetch so a failed/rejected step's cascade (later steps → skipped) shows.
+      fetchAll()
+    }
+  }
+
+  const doneCount = statuses.filter((st) => st === 'executed').length
+  const halted =
+    actionableIdx === -1 &&
+    statuses.some((st) => ['failed', 'rejected', 'skipped'].includes(st))
+
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs">
+      <div className="flex items-center gap-2 border-b border-amber-500/20 px-2.5 py-2">
+        <ShieldCheck className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span className="font-medium">Multi-step plan</span>
+        <span className="text-muted-foreground">
+          {doneCount}/{plan.steps.length} done
+          {halted ? ' · halted' : ''}
+        </span>
+      </div>
+      <ol className="min-w-0">
+        {plan.steps.map((s, i) => {
+          const stt = states[s.action_id] ?? { status: 'proposed' }
+          const meta = ACTION_STATUS[stt.status] ?? ACTION_STATUS.proposed
+          const isActionable = i === actionableIdx
+          const waiting = stt.status === 'proposed' && !isActionable
+          const isOpen = openId === s.action_id
+          return (
+            <li
+              key={s.action_id}
+              className={cn(
+                'min-w-0 border-t border-amber-500/20 px-2.5 py-2 first:border-t-0',
+                waiting && 'opacity-60'
+              )}
+            >
+              <div className="flex min-w-0 items-start gap-2">
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted font-mono text-[10px] font-semibold">
+                  {s.step}
+                </span>
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] font-semibold uppercase">
+                      {s.method}
+                    </span>
+                    <span className="min-w-0 truncate font-mono text-[11px] font-medium">
+                      {s.operation}
+                    </span>
+                  </div>
+                  {s.summary && (
+                    <div className="text-muted-foreground">{s.summary}</div>
+                  )}
+                  <div className={cn('text-[11px] font-medium', meta.cls)}>
+                    {waiting ? 'Waiting for earlier steps' : meta.label}
+                  </div>
+                  {(stt.params && stt.params !== '{}') ||
+                  stt.result ||
+                  stt.error ? (
+                    <button
+                      type="button"
+                      onClick={() => setOpenId(isOpen ? null : s.action_id)}
+                      className="mt-0.5 flex items-center gap-1 font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      {isOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                      {stt.error ? 'Error' : stt.result ? 'Result' : 'Details'}
+                    </button>
+                  ) : null}
+                  {isOpen && (
+                    <div className="space-y-1 pt-1">
+                      {stt.params && stt.params !== '{}' && (
+                        <>
+                          <div className="font-medium text-muted-foreground">
+                            {isActionable ? 'Will send' : 'Sent'}
+                          </div>
+                          <ToolBlock value={stt.params} />
+                        </>
+                      )}
+                      {stt.error ? (
+                        <pre className={toolBlockClasses}>{stt.error}</pre>
+                      ) : stt.result ? (
+                        <ToolBlock value={stt.result} />
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {isActionable && (
+                <div className="mt-2 flex items-center gap-2 pl-6">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs"
+                    disabled={busy !== null}
+                    onClick={() => act(s.action_id, 'confirm')}
+                  >
+                    {busy === s.action_id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                    Confirm step {s.step}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 gap-1 px-2 text-xs"
+                    disabled={busy !== null}
+                    onClick={() => act(s.action_id, 'reject')}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Reject
+                  </Button>
+                </div>
+              )}
+              {stt.status === 'failed' && onFix && (
+                <div className="mt-2 pl-6">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 px-2 text-xs"
+                    onClick={() =>
+                      onFix(
+                        buildFixMessage(s.operation, s.method, stt.params ?? null, stt.error ?? null)
+                      )
+                    }
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Fix with AI
+                  </Button>
+                </div>
+              )}
+            </li>
+          )
+        })}
+      </ol>
+    </div>
+  )
+}
+
+/** Route a `temps_write` tool part to the plan card or the single-action card. */
+function WriteProposalCard({
+  projectId,
+  tool,
+  onFix,
+}: {
+  projectId: number
+  tool: ToolCall
+  onFix?: (text: string) => void
+}) {
+  const plan = parsePlanProposal(tool.result)
+  if (plan) return <PlanActionCard projectId={projectId} plan={plan} onFix={onFix} />
+  return <PendingActionCard projectId={projectId} tool={tool} onFix={onFix} />
+}
+
+/**
+ * A slim, in-chat affordance to turn on AI *write actions* for this project —
+ * shown only while they're off. Enabling is a deliberate, security-sensitive
+ * step (it lets the AI PROPOSE mutations), so it goes through a confirmation
+ * dialog rather than a bare toggle; every proposed action is still individually
+ * confirm-gated at execution time. This removes the trip to Settings without
+ * cheapening the opt-in.
+ */
+function WriteActionsEnabler({ projectId }: { projectId: number }) {
+  // null = still loading / unknown; true = on (render nothing); false = off.
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    getProject({ path: { id: projectId } })
+      .then(({ data }) => {
+        if (!cancelled && data) {
+          setEnabled(data.ai_write_actions_enabled === true)
+        }
+      })
+      .catch(() => {
+        /* leave unknown — just don't show the affordance */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  const enable = async () => {
+    setBusy(true)
+    try {
+      const { error } = await updateProjectSettings({
+        path: { project_id: projectId },
+        // Enable the read-only chat too, so a project never ends up with write
+        // actions on but the chat itself off (the chat is where you propose and
+        // confirm those writes).
+        body: { ai_write_actions_enabled: true, ai_debug_chat_enabled: true },
+      })
+      if (error) throw error
+      setEnabled(true)
+      setConfirmOpen(false)
+      toast.success('AI write actions enabled for this project')
+    } catch {
+      toast.error(
+        "Couldn't enable write actions — you may need project admin permission."
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Hidden while loading, unknown, or already enabled.
+  if (enabled !== false) return null
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        className="flex w-full items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-left text-xs text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+      >
+        <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">
+          Read-only. <span className="font-medium">Enable write actions</span> to
+          let the AI propose changes.
+        </span>
+      </button>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable AI write actions?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This lets the assistant <strong>propose</strong> changes to this
+              project — redeploys, restarts, environment variables, domains.
+              Nothing runs automatically: every proposed action waits for you to
+              review and <strong>Confirm</strong> it here in the chat, and runs
+              with your own permissions. You can turn this off anytime in
+              Settings → Security.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                void enable()
+              }}
+              disabled={busy}
+            >
+              {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              Enable write actions
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }
 
@@ -302,9 +993,13 @@ function MarkdownText({ text }: { text: string }) {
 function AssistantBody({
   message,
   streaming,
+  projectId,
+  onFix,
 }: {
   message: ChatMessage
   streaming: boolean
+  projectId: number
+  onFix?: (text: string) => void
 }) {
   const parts = assistantParts(message)
   if (parts.length === 0) {
@@ -314,7 +1009,18 @@ function AssistantBody({
     <>
       {parts.map((part, idx) =>
         part.type === 'tool' ? (
-          <ToolCard key={part.tool.id} tool={part.tool} />
+          // A `temps_write` tool is a *proposed* mutation — render the human
+          // confirm/reject gate instead of a read-only result card.
+          part.tool.name === 'temps_write' ? (
+            <WriteProposalCard
+              key={part.tool.id}
+              projectId={projectId}
+              tool={part.tool}
+              onFix={onFix}
+            />
+          ) : (
+            <ToolCard key={part.tool.id} tool={part.tool} />
+          )
         ) : (
           <MarkdownText key={`text-${idx}`} text={part.text} />
         )
@@ -780,6 +1486,8 @@ export function DebugChatPanel({
                   <AssistantBody
                     message={m}
                     streaming={streaming && i === visible.length - 1}
+                    projectId={projectId}
+                    onFix={(text) => void send(text)}
                   />
                 </div>
                 {m.created_at && assistantParts(m).length > 0 && (
@@ -822,6 +1530,8 @@ export function DebugChatPanel({
             : `Share context: ${pageContext.label}`}
         </button>
       )}
+
+      <WriteActionsEnabler projectId={projectId} />
 
       <div className="flex items-end gap-2 border-t pt-3">
         <Textarea

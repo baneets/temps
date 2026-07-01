@@ -115,7 +115,7 @@ impl TempsPlugin for DeploymentsPlugin {
             let database_cron_service = Arc::new(crate::services::DatabaseCronConfigService::new(
                 db.clone(),
                 queue_service.clone(),
-                deployment_token_service,
+                deployment_token_service.clone(),
             ));
             let cron_service =
                 database_cron_service.clone() as Arc<dyn crate::jobs::CronConfigService>;
@@ -221,6 +221,20 @@ impl TempsPlugin for DeploymentsPlugin {
 
             // Get DSN service for automatic Sentry DSN generation (required)
             let dsn_service = context.require_service::<temps_error_tracking::DSNService>();
+
+            // Wire the shared environment-variable resolver into DeploymentService
+            // so the inline promote/rollback deploy paths resolve env from the
+            // selected environment (the SAME set as a normal deploy) instead of
+            // starting the reused image with no config. See services::env_resolver.
+            let env_resolver = Arc::new(crate::services::env_resolver::DeploymentEnvResolver {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                config_service: config_service.clone(),
+                external_service_manager: external_service_manager.clone(),
+                dsn_service: dsn_service.clone(),
+                deployment_token_service: deployment_token_service.clone(),
+            });
+            deployment_service.set_env_resolver(env_resolver);
 
             // Create JobProcessor with workflow execution capability
             let job_receiver = queue_service.subscribe();

@@ -9,11 +9,13 @@
 
 pub mod audit;
 pub mod handlers;
+pub mod pending_actions;
 pub mod plugin;
 pub mod provider;
 pub mod providers;
 pub mod service;
 
+pub use pending_actions::{PendingActionError, PendingActionService};
 pub use plugin::AiChatPlugin;
 pub use provider::{ConversationContextProvider, ConversationSeed};
 pub use providers::alert::AlertChatProvider;

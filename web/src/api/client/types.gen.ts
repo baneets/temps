@@ -1672,6 +1672,15 @@ export type ChangePasswordRequest = {
     revoke_other_sessions?: boolean;
 };
 
+/**
+ * Change a project's source type to a Git-less type (docker_image /
+ * static_files / manual). Switching TO `git` is done via the Git settings
+ * endpoint (which also supplies the repository + provider connection).
+ */
+export type ChangeProjectSourceRequest = {
+    source_type: SourceType;
+};
+
 export type ChatCompletionChoice = {
     finish_reason?: string | null;
     index: number;
@@ -3798,11 +3807,15 @@ export type DeploymentConfig = {
      */
     containerExecEnabled?: boolean;
     /**
-     * CPU limit in millicores (e.g., 2000 = 2 CPUs)
+     * CPU limit in microcores, where 1_000_000 = 1 full CPU core
+     * (e.g., 2_000_000 = 2 CPUs). NOT millicores. `None` = uncapped.
      */
     cpuLimit?: number | null;
     /**
-     * CPU request in millicores (e.g., 100 = 0.1 CPU, 1000 = 1 CPU)
+     * CPU request in microcores, where 1_000_000 = 1 full CPU core
+     * (e.g., 100_000 = 0.1 CPU, 500_000 = 0.5 CPU, 2_000_000 = 2 CPUs).
+     * NOT millicores — the deployer formats this as `{n}u` and converts
+     * `n / 1_000_000` cores into Docker nano_cpus.
      */
     cpuRequest?: number | null;
     /**
@@ -10161,6 +10174,36 @@ export type PeerListResponse = {
     peers: Array<PeerEntry>;
 };
 
+/**
+ * A proposed AI write action awaiting human confirmation.
+ */
+export type PendingActionResponse = {
+    confirmed_at?: string | null;
+    created_at: string;
+    error?: string | null;
+    executed_at?: string | null;
+    method: string;
+    operation_id: string;
+    /**
+     * The flat params to be replayed at execute time (shown pre-execution for review).
+     */
+    params: unknown;
+    /**
+     * Set when this action is one step of a multi-step plan (chained actions);
+     * all steps of the plan share this id. Absent for standalone single actions.
+     */
+    plan_public_id?: string | null;
+    public_id: string;
+    required_permission?: string | null;
+    result?: unknown;
+    status: string;
+    /**
+     * 0-based order of this step within its plan (0 for standalone actions).
+     */
+    step_index: number;
+    summary: string;
+};
+
 export type PerformanceMetricsQuery = {
     deployment_id?: number | null;
     /**
@@ -10758,6 +10801,10 @@ export type ProjectResponse = {
      * Opt-in to AI debugging chat, e.g. on deployment failures (NULL/false = off).
      */
     ai_debug_chat_enabled?: boolean | null;
+    /**
+     * Opt-in to AI propose-then-confirm write capability (false = off).
+     */
+    ai_write_actions_enabled: boolean;
     /**
      * Attack mode - when enabled, requires CAPTCHA verification for all project environments
      */
@@ -11715,6 +11762,13 @@ export type RemoteDeploymentResponse = {
 export type RemoveNodeResponse = {
     id: number;
     message: string;
+};
+
+export type RenameConversationRequest = {
+    /**
+     * New human-facing title. Trimmed; must be non-empty after trimming.
+     */
+    title: string;
 };
 
 export type RepositoryListQuery = {
@@ -15423,6 +15477,10 @@ export type UpdateProjectSettingsRequest = {
      * Opt in to AI debugging chat, e.g. on deployment failures (ADR-023).
      */
     ai_debug_chat_enabled?: boolean | null;
+    /**
+     * Opt in to AI propose-then-confirm write capability.
+     */
+    ai_write_actions_enabled?: boolean | null;
     /**
      * Enable/disable attack mode (CAPTCHA protection) for all project environments
      */
@@ -32120,6 +32178,50 @@ export type GetLastDeploymentResponses = {
 
 export type GetLastDeploymentResponse = GetLastDeploymentResponses[keyof GetLastDeploymentResponses];
 
+export type ChangeProjectSourceData = {
+    body: ChangeProjectSourceRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/projects/{id}/source';
+};
+
+export type ChangeProjectSourceErrors = {
+    /**
+     * Invalid source type change (e.g. switching to Git here)
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ChangeProjectSourceResponses = {
+    /**
+     * Source type changed
+     */
+    200: ProjectResponse;
+};
+
+export type ChangeProjectSourceResponse = ChangeProjectSourceResponses[keyof ChangeProjectSourceResponses];
+
 export type TriggerProjectPipelineData = {
     body: TriggerPipelinePayload;
     path: {
@@ -33037,6 +33139,29 @@ export type GetConversationResponses = {
 
 export type GetConversationResponse = GetConversationResponses[keyof GetConversationResponses];
 
+export type RenameConversationData = {
+    body: RenameConversationRequest;
+    path: {
+        project_id: number;
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}';
+};
+
+export type RenameConversationErrors = {
+    400: unknown;
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type RenameConversationResponses = {
+    200: ConversationResponse;
+};
+
+export type RenameConversationResponse = RenameConversationResponses[keyof RenameConversationResponses];
+
 export type ArchiveConversationData = {
     body?: never;
     path: {
@@ -33081,6 +33206,100 @@ export type SendMessageResponses = {
      */
     200: unknown;
 };
+
+export type ListPendingActionsData = {
+    body?: never;
+    path: {
+        project_id: number;
+        /**
+         * Conversation public id
+         */
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}/pending-actions';
+};
+
+export type ListPendingActionsErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type ListPendingActionsResponses = {
+    200: Array<PendingActionResponse>;
+};
+
+export type ListPendingActionsResponse = ListPendingActionsResponses[keyof ListPendingActionsResponses];
+
+export type GetPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}';
+};
+
+export type GetPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type GetPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type GetPendingActionResponse = GetPendingActionResponses[keyof GetPendingActionResponses];
+
+export type ConfirmPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm';
+};
+
+export type ConfirmPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+    409: unknown;
+    503: unknown;
+};
+
+export type ConfirmPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type ConfirmPendingActionResponse = ConfirmPendingActionResponses[keyof ConfirmPendingActionResponses];
+
+export type RejectPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}/reject';
+};
+
+export type RejectPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+    409: unknown;
+};
+
+export type RejectPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type RejectPendingActionResponse = RejectPendingActionResponses[keyof RejectPendingActionResponses];
 
 export type ListProjectAlarmsData = {
     body?: never;

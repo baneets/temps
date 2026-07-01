@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, PullRequest, Repository, RepositoryPage, User, WebhookConfig,
+    GitProviderType, PullRequest, RepoDirEntry, Repository, RepositoryPage, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -764,6 +764,103 @@ impl GitProviderService for GiteaProvider {
             content: file.content.unwrap_or_default(),
             encoding: file.encoding.unwrap_or_else(|| "base64".to_string()),
         })
+    }
+
+    async fn list_directory(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        reference: Option<&str>,
+    ) -> Result<Vec<RepoDirEntry>, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        // Percent-encode each path segment individually so `/` separators are
+        // preserved but user-supplied characters can't break the URL.
+        let encoded_path = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|segment| urlencoding::encode(segment).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+
+        // Gitea's Contents API mirrors GitHub's:
+        // GET {api}/repos/{owner}/{repo}/contents/{path}?ref={ref}
+        let mut url = format!(
+            "{}/repos/{}/{}/contents/{}",
+            self.api_base(),
+            owner,
+            repo,
+            encoded_path
+        );
+        if let Some(ref_name) = reference {
+            url.push_str(&format!("?ref={}", urlencoding::encode(ref_name)));
+        }
+
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to list directory '{path}' in {owner}/{repo}: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct GiteaContentItem {
+            name: String,
+            path: String,
+            #[serde(rename = "type")]
+            item_type: String,
+            size: Option<u64>,
+        }
+
+        let body_bytes = response.bytes().await.map_err(|e| {
+            GitProviderError::ApiError(format!(
+                "Failed to read directory listing response body: {e}"
+            ))
+        })?;
+
+        // A directory returns a JSON array; a file returns a single object.
+        let items: Vec<GiteaContentItem> =
+            if let Ok(arr) = serde_json::from_slice::<Vec<GiteaContentItem>>(&body_bytes) {
+                arr
+            } else {
+                match serde_json::from_slice::<GiteaContentItem>(&body_bytes) {
+                    Ok(single) => vec![single],
+                    Err(e) => {
+                        return Err(GitProviderError::ApiError(format!(
+                            "Failed to parse directory listing for '{path}' in {owner}/{repo}: {e}"
+                        )));
+                    }
+                }
+            };
+
+        let mut entries: Vec<RepoDirEntry> = items
+            .into_iter()
+            .map(|item| {
+                let is_dir = item.item_type == "dir";
+                let size = if item.item_type == "file" {
+                    item.size
+                } else {
+                    None
+                };
+                RepoDirEntry {
+                    name: item.name,
+                    path: item.path,
+                    is_dir,
+                    size,
+                }
+            })
+            .collect();
+
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+        Ok(entries)
     }
 
     async fn get_latest_commit(

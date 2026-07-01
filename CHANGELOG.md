@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **AI write actions (propose-then-confirm).** The project AI assistant can now
+  go beyond read-only investigation and *propose* changes — redeploy/rollback,
+  pause/resume, container restart, env-var edits, domain attach/detach — but it
+  **never executes them on its own**. Each proposal appears in chat as a
+  confirm/reject card; only when you click **Confirm** does Temps replay the
+  change through the real API as *you* (same permission checks, full audit log).
+  The capability is **off by default** and enabled per project under Settings →
+  Security → AI Assistance ("AI write actions"). The set of allowed operations
+  is a small, curated, mostly-reversible allowlist; everything else stays
+  read-only. Confirmed and rejected actions are audit-logged
+  (`ai.pending_action.confirmed` / `.rejected`).
 - **More Git providers: Bitbucket, Gitea, and any HTTPS server.** Alongside
   GitHub and GitLab, Temps now connects to **Bitbucket Cloud** (access token or
   app password, with the push webhook and pull-request comments registered

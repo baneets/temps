@@ -24,6 +24,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import { DeploymentSourceCard } from './DeploymentSourceCard'
 import {
   Form,
   FormControl,
@@ -291,6 +292,9 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
 
   return (
     <div className="space-y-6">
+      {/* Deployment source — how the project is built/deployed */}
+      <DeploymentSourceCard project={project} refetch={refetch} />
+
       {/* Project Settings Card */}
       <Form {...projectForm}>
         <form onSubmit={projectForm.handleSubmit(handleSaveProject)}>

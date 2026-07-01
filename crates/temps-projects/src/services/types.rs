@@ -65,6 +65,7 @@ pub struct Project {
     pub attack_mode: bool,
     pub ai_alert_summaries_enabled: Option<bool>,
     pub ai_debug_chat_enabled: Option<bool>,
+    pub ai_write_actions_enabled: bool,
     pub enable_preview_environments: bool,
     /// When true, newly-created preview environments default to on-demand mode.
     pub preview_envs_on_demand: bool,

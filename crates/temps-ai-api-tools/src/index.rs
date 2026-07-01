@@ -1,22 +1,39 @@
-//! Read-only OpenAPI index.
+//! API operation index — GET (read-only) and vetted write operations.
 //!
-//! [`ReadOnlyApiIndex`] is built from a `utoipa::openapi::OpenApi` value; it
-//! retains only `GET` operations and provides keyword-ranked search over them.
+//! [`ReadOnlyApiIndex`] was originally built from only `GET` operations.  It
+//! now also backs a **vetted write index** via
+//! [`ReadOnlyApiIndex::from_openapi_write_allowlist`], which indexes
+//! `POST`/`PUT`/`PATCH`/`DELETE` operations whose `operation_id` has been
+//! explicitly allowlisted.  Body fields are surfaced as `ParamSpec` entries
+//! with `location: ParamLocation::Body` so the same CLI/search/describe
+//! machinery works unchanged over write operations.
 //!
 //! ## utoipa 5.4.0 type map used here
 //!
-//! | Purpose             | utoipa type                                               |
-//! |---------------------|-----------------------------------------------------------|
-//! | Root document       | `utoipa::openapi::OpenApi`                                |
-//! | Path map            | `openapi.paths.paths: BTreeMap<String, PathItem>`         |
-//! | GET operation       | `path_item.get: Option<Operation>`                        |
-//! | Operation tags      | `operation.tags: Option<Vec<String>>`                     |
-//! | Operation params    | `operation.parameters: Option<Vec<Parameter>>`            |
-//! | Parameter location  | `parameter.parameter_in: ParameterIn` (`Path`/`Query`/…) |
-//! | Parameter required  | `parameter.required: Required` (`True`/`False`)           |
-//! | Parameter schema    | `parameter.schema: Option<RefOr<Schema>>`                 |
-//! | Schema type         | `Schema::Object(obj) => obj.schema_type: SchemaType`      |
-//! | Schema enum values  | `obj.enum_values: Option<Vec<Value>>`                     |
+//! | Purpose              | utoipa type                                               |
+//! |----------------------|-----------------------------------------------------------|
+//! | Root document        | `utoipa::openapi::OpenApi`                                |
+//! | Path map             | `openapi.paths.paths: BTreeMap<String, PathItem>`         |
+//! | GET operation        | `path_item.get: Option<Operation>`                        |
+//! | POST operation       | `path_item.post: Option<Operation>`                       |
+//! | PUT operation        | `path_item.put: Option<Operation>`                        |
+//! | PATCH operation      | `path_item.patch: Option<Operation>`                      |
+//! | DELETE operation     | `path_item.delete: Option<Operation>`                     |
+//! | Operation tags       | `operation.tags: Option<Vec<String>>`                     |
+//! | Operation params     | `operation.parameters: Option<Vec<Parameter>>`            |
+//! | Request body         | `operation.request_body: Option<RequestBody>`             |
+//! | Request body content | `request_body.content: BTreeMap<String, Content>`         |
+//! | Content schema       | `content.schema: Option<RefOr<Schema>>`                   |
+//! | Components           | `openapi.components: Option<Components>`                  |
+//! | Component schemas    | `components.schemas: BTreeMap<String, RefOr<Schema>>`     |
+//! | Parameter location   | `parameter.parameter_in: ParameterIn` (`Path`/`Query`/…) |
+//! | Parameter required   | `parameter.required: Required` (`True`/`False`)           |
+//! | Parameter schema     | `parameter.schema: Option<RefOr<Schema>>`                 |
+//! | Schema type          | `Schema::Object(obj) => obj.schema_type: SchemaType`      |
+//! | Schema enum values   | `obj.enum_values: Option<Vec<Value>>`                     |
+//! | Object properties    | `obj.properties: BTreeMap<String, RefOr<Schema>>`         |
+//! | Object required      | `obj.required: Vec<String>`                               |
+//! | $ref location        | `Ref::ref_location: String`                               |
 
 use std::collections::BTreeMap;
 
@@ -26,7 +43,7 @@ use utoipa::openapi::{
     RefOr, Required, Schema,
 };
 
-/// Whether this parameter lives in the URL path or the query string.
+/// Where this parameter is carried in the HTTP request.
 ///
 /// Header and Cookie parameters are ignored by this crate (GET operations
 /// rarely use them for business data, and they cannot be injected safely
@@ -35,6 +52,9 @@ use utoipa::openapi::{
 pub enum ParamLocation {
     Path,
     Query,
+    /// Request-body field (JSON object property).  Only present on write
+    /// operations indexed via [`ReadOnlyApiIndex::from_openapi_write_allowlist`].
+    Body,
 }
 
 impl std::fmt::Display for ParamLocation {
@@ -42,6 +62,7 @@ impl std::fmt::Display for ParamLocation {
         match self {
             ParamLocation::Path => write!(f, "path"),
             ParamLocation::Query => write!(f, "query"),
+            ParamLocation::Body => write!(f, "body"),
         }
     }
 }
@@ -49,7 +70,8 @@ impl std::fmt::Display for ParamLocation {
 /// Compact description of a single parameter, extracted from the utoipa schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParamSpec {
-    /// Parameter name as it appears in the path template or query string.
+    /// Parameter name as it appears in the path template, query string, or
+    /// request body JSON object.
     pub name: String,
     /// Where the parameter is carried.
     pub location: ParamLocation,
@@ -67,14 +89,15 @@ pub struct ParamSpec {
     pub description: Option<String>,
 }
 
-/// A single read-only operation kept in the index.
+/// A single operation kept in the index (GET *or* an allowlisted write method).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiOperation {
     /// Stable identifier for this operation, used as the tool call name.
     pub operation_id: String,
     /// URL path template, e.g. `/projects/{project_id}/deployments/{id}`.
     pub path: String,
-    /// Always `"GET"` in the current implementation.
+    /// HTTP method in uppercase: `"GET"`, `"POST"`, `"PUT"`, `"PATCH"`, or
+    /// `"DELETE"`.
     pub method: String,
     /// One-line description from the OpenAPI `summary` field, if present.
     pub summary: Option<String>,
@@ -86,6 +109,8 @@ pub struct ApiOperation {
     /// Tags used for grouping, also used in keyword search.
     pub tags: Vec<String>,
     /// Typed parameter specifications derived from the OpenAPI document.
+    /// For write operations this includes body fields appended after any
+    /// path/query params.
     pub params: Vec<ParamSpec>,
 }
 
@@ -142,11 +167,25 @@ impl From<&ApiOperation> for OperationSchema {
 // ReadOnlyApiIndex
 // ---------------------------------------------------------------------------
 
-/// An in-memory index of read-only (GET) API operations built from a
-/// `utoipa::openapi::OpenApi` document.
+/// An in-memory index of API operations built from a `utoipa::openapi::OpenApi`
+/// document.
+///
+/// The index supports two construction modes:
+///
+/// - **Read-only (GET-only)**: [`from_openapi`] / [`from_openapi_allowlist`] —
+///   only `GET` operations are kept.  This is the existing production posture for
+///   the AI `call_api` read tool.
+/// - **Vetted write**: [`from_openapi_write_allowlist`] — `POST`, `PUT`, `PATCH`,
+///   and `DELETE` operations whose `operation_id` is explicitly allowlisted.
+///   Body fields are resolved from the operation's `requestBody` and appended to
+///   `params` as `ParamSpec { location: Body, .. }`.
 ///
 /// Construction is cheap (O(n) in the number of paths × operations) and the
 /// result is `Clone`-able so it can be shared across threads via `Arc`.
+///
+/// [`from_openapi`]: ReadOnlyApiIndex::from_openapi
+/// [`from_openapi_allowlist`]: ReadOnlyApiIndex::from_openapi_allowlist
+/// [`from_openapi_write_allowlist`]: ReadOnlyApiIndex::from_openapi_write_allowlist
 #[derive(Debug, Clone)]
 pub struct ReadOnlyApiIndex {
     operations: Vec<ApiOperation>,
@@ -187,7 +226,7 @@ impl ReadOnlyApiIndex {
                     if denylist.contains(&op_id.as_str()) {
                         continue;
                     }
-                    let api_op = build_api_operation(op_id.clone(), path.clone(), op);
+                    let api_op = build_api_operation(op_id.clone(), path.clone(), "GET", op, &[]);
                     operations.push(api_op);
                 }
             }
@@ -216,9 +255,64 @@ impl ReadOnlyApiIndex {
                     if !allowlist.contains(&op_id.as_str()) {
                         continue;
                     }
-                    let api_op = build_api_operation(op_id.clone(), path.clone(), op);
+                    let api_op = build_api_operation(op_id.clone(), path.clone(), "GET", op, &[]);
                     operations.push(api_op);
                 }
+            }
+        }
+
+        Self {
+            operations,
+            tag_descriptions: extract_tag_descriptions(openapi),
+        }
+    }
+
+    /// Build the write index from an OpenAPI document, including ONLY non-GET
+    /// operations whose `operation_id` is in `allowlist` (opt-in /
+    /// secure-by-default).
+    ///
+    /// This is the production posture for the AI write tool — a new mutating
+    /// endpoint is never exposed to the AI unless it has been explicitly vetted
+    /// and added to the write allowlist.
+    ///
+    /// Each operation is indexed with its real HTTP method (`"POST"`, `"PUT"`,
+    /// `"PATCH"`, or `"DELETE"`).  Request-body fields (from the
+    /// `application/json` content type, preferring it over any other) are
+    /// appended to `params` as `ParamSpec { location: Body, .. }`.  One level
+    /// of `$ref` is resolved against `openapi.components.schemas`; nested
+    /// refs/objects that cannot be further resolved become `ty: "object"` (best
+    /// effort — never panics).
+    pub fn from_openapi_write_allowlist(
+        openapi: &utoipa::openapi::OpenApi,
+        allowlist: &[&str],
+    ) -> Self {
+        let mut operations = Vec::new();
+
+        // Pre-build a slice of (method-string, Option<Operation>) pairs from
+        // each path_item so we can iterate uniformly.
+        for (path, path_item) in &openapi.paths.paths {
+            let write_ops: [(&str, Option<&Operation>); 4] = [
+                ("POST", path_item.post.as_ref()),
+                ("PUT", path_item.put.as_ref()),
+                ("PATCH", path_item.patch.as_ref()),
+                ("DELETE", path_item.delete.as_ref()),
+            ];
+
+            for (method, maybe_op) in &write_ops {
+                let Some(op) = maybe_op else { continue };
+                let Some(ref op_id) = op.operation_id else {
+                    continue;
+                };
+                if !allowlist.contains(&op_id.as_str()) {
+                    continue;
+                }
+
+                // Resolve body fields from the operation's requestBody.
+                let body_params = resolve_body_params(op, openapi);
+
+                let api_op =
+                    build_api_operation(op_id.clone(), path.clone(), method, op, &body_params);
+                operations.push(api_op);
             }
         }
 
@@ -343,11 +437,21 @@ impl ReadOnlyApiIndex {
 // ---------------------------------------------------------------------------
 
 /// Construct an [`ApiOperation`] from an utoipa [`Operation`] and its path.
-fn build_api_operation(operation_id: String, path: String, op: &Operation) -> ApiOperation {
+///
+/// `method` must be an uppercase HTTP method string.
+/// `extra_params` are appended after the path/query params already extracted
+/// from `op.parameters` — used to supply body fields for write operations.
+fn build_api_operation(
+    operation_id: String,
+    path: String,
+    method: &str,
+    op: &Operation,
+    extra_params: &[ParamSpec],
+) -> ApiOperation {
     let summary = op.summary.clone();
     let description = op.description.clone();
     let tags = op.tags.clone().unwrap_or_default();
-    let params = op
+    let mut params: Vec<ParamSpec> = op
         .parameters
         .as_deref()
         .unwrap_or(&[])
@@ -355,15 +459,98 @@ fn build_api_operation(operation_id: String, path: String, op: &Operation) -> Ap
         .filter_map(build_param_spec)
         .collect();
 
+    params.extend_from_slice(extra_params);
+
     ApiOperation {
         operation_id,
         path,
-        method: "GET".to_string(),
+        method: method.to_string(),
         summary,
         description,
         tags,
         params,
     }
+}
+
+/// Resolve the request-body fields of `op` into a list of [`ParamSpec`]s with
+/// `location: Body`.
+///
+/// Steps:
+/// 1. Read `op.request_body` → its `content` map.
+/// 2. Prefer `"application/json"`; fall back to the first entry.
+/// 3. Get `content.schema`.
+/// 4. If the schema is a `$ref`, resolve one level against
+///    `openapi.components.schemas`.
+/// 5. If we land on a `Schema::Object`, emit one `ParamSpec` per top-level
+///    property.
+/// 6. If we can't resolve (missing components, nested refs, non-object schema),
+///    return an empty vec — best effort, never panics.
+fn resolve_body_params(op: &Operation, openapi: &utoipa::openapi::OpenApi) -> Vec<ParamSpec> {
+    let request_body = match op.request_body.as_ref() {
+        Some(rb) => rb,
+        None => return vec![],
+    };
+
+    // Pick application/json first, else the first content entry.
+    let content = if let Some(c) = request_body.content.get("application/json") {
+        c
+    } else if let Some(c) = request_body.content.values().next() {
+        c
+    } else {
+        return vec![];
+    };
+
+    let schema_ref_or = match content.schema.as_ref() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    // Resolve one level of $ref.
+    let resolved: &Schema = match schema_ref_or {
+        RefOr::T(s) => s,
+        RefOr::Ref(r) => {
+            // Extract the last segment of the $ref path, e.g.
+            // "#/components/schemas/CreateDeploymentRequest" → "CreateDeploymentRequest"
+            let schema_name = r.ref_location.split('/').next_back().unwrap_or("");
+            match openapi
+                .components
+                .as_ref()
+                .and_then(|c| c.schemas.get(schema_name))
+            {
+                Some(RefOr::T(s)) => s,
+                // Nested ref or not found — best effort.
+                _ => return vec![],
+            }
+        }
+    };
+
+    // We only handle Object schemas (the common case for request bodies).
+    let obj = match resolved {
+        Schema::Object(o) => o,
+        _ => return vec![],
+    };
+
+    let mut params = Vec::new();
+    for (prop_name, prop_schema) in &obj.properties {
+        let required = obj.required.contains(prop_name);
+        let (ty, enum_values) = extract_type_and_enum(Some(prop_schema));
+
+        // Try to get a description from the property schema if it's an Object.
+        let description = match prop_schema {
+            RefOr::T(Schema::Object(prop_obj)) => prop_obj.description.clone(),
+            _ => None,
+        };
+
+        params.push(ParamSpec {
+            name: prop_name.clone(),
+            location: ParamLocation::Body,
+            required,
+            ty,
+            enum_values,
+            description,
+        });
+    }
+    params
 }
 
 /// Convert a single utoipa [`Parameter`] into a [`ParamSpec`].
@@ -396,7 +583,7 @@ fn build_param_spec(param: &utoipa::openapi::path::Parameter) -> Option<ParamSpe
 ///
 /// `$ref` schemas are not resolved here (would need the full components map);
 /// they return `("string", [])` as a safe default.
-fn extract_type_and_enum(schema: Option<&RefOr<Schema>>) -> (String, Vec<String>) {
+pub(crate) fn extract_type_and_enum(schema: Option<&RefOr<Schema>>) -> (String, Vec<String>) {
     let Some(ref_or) = schema else {
         return ("string".to_string(), vec![]);
     };
@@ -537,7 +724,7 @@ mod tests {
             )
             .build();
 
-        // POST operation — should be excluded from the index.
+        // POST operation — should be excluded from the GET index.
         let create_deployment = OperationBuilder::new()
             .operation_id(Some("create_deployment"))
             .summary(Some("Create a new deployment"))
@@ -565,6 +752,156 @@ mod tests {
             .paths(paths)
             .build()
     }
+
+    /// Build an OpenApi document that contains POST + PATCH + DELETE write ops,
+    /// and includes a component schema for request-body resolution via `$ref`.
+    fn write_test_openapi() -> utoipa::openapi::OpenApi {
+        use utoipa::openapi::{
+            request_body::RequestBodyBuilder, schema::ComponentsBuilder, Content, ContentBuilder,
+        };
+
+        // Component schema: CreateProjectRequest { name: string (required), description: string }
+        let create_req_schema = Schema::Object(
+            ObjectBuilder::new()
+                .schema_type(SchemaType::Type(Type::Object))
+                .property(
+                    "name",
+                    RefOr::T(Schema::Object(
+                        ObjectBuilder::new()
+                            .schema_type(SchemaType::Type(Type::String))
+                            .description(Some("Project name"))
+                            .build(),
+                    )),
+                )
+                .property(
+                    "description",
+                    RefOr::T(Schema::Object(
+                        ObjectBuilder::new()
+                            .schema_type(SchemaType::Type(Type::String))
+                            .build(),
+                    )),
+                )
+                .required("name")
+                .build(),
+        );
+
+        let components = ComponentsBuilder::new()
+            .schema("CreateProjectRequest", RefOr::T(create_req_schema))
+            .build();
+
+        // POST /projects — body is a $ref to CreateProjectRequest
+        let create_project = OperationBuilder::new()
+            .operation_id(Some("create_project"))
+            .summary(Some("Create a new project"))
+            .tag("Projects")
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .content(
+                        "application/json",
+                        ContentBuilder::new()
+                            .schema(Some(RefOr::Ref(
+                                utoipa::openapi::schema::Ref::from_schema_name(
+                                    "CreateProjectRequest",
+                                ),
+                            )))
+                            .build(),
+                    )
+                    .build(),
+            ))
+            .build();
+
+        // PATCH /projects/{id} — body is an inline object with an enum field
+        let update_project = OperationBuilder::new()
+            .operation_id(Some("update_project"))
+            .summary(Some("Update a project"))
+            .tag("Projects")
+            .parameter(
+                ParameterBuilder::new()
+                    .name("id")
+                    .parameter_in(ParameterIn::Path)
+                    .required(Required::True)
+                    .schema(Some(RefOr::T(Schema::Object(
+                        ObjectBuilder::new()
+                            .schema_type(SchemaType::Type(Type::Integer))
+                            .build(),
+                    ))))
+                    .build(),
+            )
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .content(
+                        "application/json",
+                        Content::new(Some(RefOr::T(Schema::Object(
+                            ObjectBuilder::new()
+                                .schema_type(SchemaType::Type(Type::Object))
+                                .property(
+                                    "status",
+                                    RefOr::T(Schema::Object(
+                                        ObjectBuilder::new()
+                                            .schema_type(SchemaType::Type(Type::String))
+                                            .enum_values(Some(["active", "archived"]))
+                                            .build(),
+                                    )),
+                                )
+                                .required("status")
+                                .build(),
+                        )))),
+                    )
+                    .build(),
+            ))
+            .build();
+
+        // DELETE /projects/{id} — no body
+        let delete_project = OperationBuilder::new()
+            .operation_id(Some("delete_project"))
+            .summary(Some("Delete a project"))
+            .tag("Projects")
+            .parameter(
+                ParameterBuilder::new()
+                    .name("id")
+                    .parameter_in(ParameterIn::Path)
+                    .required(Required::True)
+                    .schema(Some(RefOr::T(Schema::Object(
+                        ObjectBuilder::new()
+                            .schema_type(SchemaType::Type(Type::Integer))
+                            .build(),
+                    ))))
+                    .build(),
+            )
+            .build();
+
+        // GET /projects — should NOT appear in write allowlist index
+        let list_projects = OperationBuilder::new()
+            .operation_id(Some("list_projects"))
+            .summary(Some("List projects"))
+            .tag("Projects")
+            .build();
+
+        let paths = PathsBuilder::new()
+            .path("/projects", {
+                let mut item = PathItem::default();
+                item.get = Some(list_projects);
+                item.post = Some(create_project);
+                item
+            })
+            .path("/projects/{id}", {
+                let mut item = PathItem::default();
+                item.patch = Some(update_project);
+                item.delete = Some(delete_project);
+                item
+            })
+            .build();
+
+        OpenApiBuilder::new()
+            .info(utoipa::openapi::Info::new("Write Test API", "1.0.0"))
+            .paths(paths)
+            .components(Some(components))
+            .build()
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing GET-builder tests — must stay green
+    // -----------------------------------------------------------------------
 
     #[test]
     fn index_keeps_only_get_operations() {
@@ -706,5 +1043,130 @@ mod tests {
         let index = ReadOnlyApiIndex::from_openapi(&api, &[]);
 
         assert!(index.get("nonexistent_operation").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // New write-allowlist tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_allowlist_keeps_only_allowlisted_non_get_ops() {
+        let api = write_test_openapi();
+        let index = ReadOnlyApiIndex::from_openapi_write_allowlist(
+            &api,
+            &["create_project", "delete_project"],
+        );
+
+        assert_eq!(
+            index.len(),
+            2,
+            "should have exactly 2 allowlisted write ops"
+        );
+        assert!(index.get("create_project").is_some());
+        assert!(index.get("delete_project").is_some());
+        // GET op is never included in the write index.
+        assert!(index.get("list_projects").is_none());
+        // Non-allowlisted write op is excluded.
+        assert!(index.get("update_project").is_none());
+    }
+
+    #[test]
+    fn write_allowlist_sets_correct_methods() {
+        let api = write_test_openapi();
+        let index = ReadOnlyApiIndex::from_openapi_write_allowlist(
+            &api,
+            &["create_project", "update_project", "delete_project"],
+        );
+
+        let create = index.get("create_project").expect("create_project");
+        assert_eq!(create.method, "POST");
+
+        let update = index.get("update_project").expect("update_project");
+        assert_eq!(update.method, "PATCH");
+
+        let delete = index.get("delete_project").expect("delete_project");
+        assert_eq!(delete.method, "DELETE");
+    }
+
+    #[test]
+    fn write_allowlist_resolves_ref_body_fields() {
+        // create_project body is a $ref to CreateProjectRequest which has
+        // `name` (required, string) and `description` (optional, string).
+        let api = write_test_openapi();
+        let index = ReadOnlyApiIndex::from_openapi_write_allowlist(&api, &["create_project"]);
+
+        let op = index.get("create_project").expect("create_project");
+        let body_params: Vec<&ParamSpec> = op
+            .params
+            .iter()
+            .filter(|p| matches!(p.location, ParamLocation::Body))
+            .collect();
+
+        assert!(
+            !body_params.is_empty(),
+            "should have body params from $ref resolution"
+        );
+
+        let name_param = body_params
+            .iter()
+            .find(|p| p.name == "name")
+            .expect("name param");
+        assert!(name_param.required, "name should be required");
+        assert_eq!(name_param.ty, "string");
+
+        let desc_param = body_params
+            .iter()
+            .find(|p| p.name == "description")
+            .expect("description param");
+        assert!(!desc_param.required, "description should be optional");
+        assert_eq!(desc_param.ty, "string");
+    }
+
+    #[test]
+    fn write_allowlist_resolves_inline_body_with_enum() {
+        // update_project body is an inline object with `status` (required, enum).
+        let api = write_test_openapi();
+        let index = ReadOnlyApiIndex::from_openapi_write_allowlist(&api, &["update_project"]);
+
+        let op = index.get("update_project").expect("update_project");
+
+        // Should have path param `id` + body param `status`.
+        let id_param = op.params.iter().find(|p| p.name == "id").expect("id param");
+        assert_eq!(id_param.location, ParamLocation::Path);
+
+        let status_param = op
+            .params
+            .iter()
+            .find(|p| p.name == "status")
+            .expect("status param");
+        assert_eq!(status_param.location, ParamLocation::Body);
+        assert!(status_param.required, "status should be required");
+        assert_eq!(status_param.enum_values, vec!["active", "archived"]);
+    }
+
+    #[test]
+    fn write_allowlist_empty_returns_no_ops() {
+        let api = write_test_openapi();
+        let index = ReadOnlyApiIndex::from_openapi_write_allowlist(&api, &[]);
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn get_index_unchanged_by_write_builder() {
+        // The original GET builders must still work exactly as before —
+        // write ops are NOT included when using from_openapi or from_openapi_allowlist.
+        let api = write_test_openapi();
+
+        let read_index = ReadOnlyApiIndex::from_openapi(&api, &[]);
+        assert_eq!(read_index.len(), 1, "only list_projects GET");
+        assert!(read_index.get("list_projects").is_some());
+        assert!(read_index.get("create_project").is_none());
+        assert!(read_index.get("update_project").is_none());
+        assert!(read_index.get("delete_project").is_none());
+
+        let allowlist_index = ReadOnlyApiIndex::from_openapi_allowlist(&api, &["list_projects"]);
+        assert_eq!(allowlist_index.len(), 1);
+        assert!(allowlist_index.get("list_projects").is_some());
+        assert!(allowlist_index.get("create_project").is_none());
     }
 }

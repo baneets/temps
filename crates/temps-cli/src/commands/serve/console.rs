@@ -1942,6 +1942,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         "get_deployment",
                         "get_last_deployment",
                         "get_project_deployments",
+                        // Manual-deploy discovery: registered external images the
+                        // AI can deploy by id/ref (metadata only — no registry
+                        // credentials). Static bundles are frontend-only, so their
+                        // read ops are intentionally excluded here.
+                        "list_external_images",
+                        "get_external_image",
                         "get_deployment_jobs",
                         "get_deployment_operations",
                         "get_deployment_operation_status",
@@ -2037,6 +2043,99 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                     );
                     handle.set(caller);
                     debug!("ADR-024: InternalApiCaller populated in ApiToolsHandle");
+
+                    // ── Propose-then-confirm WRITE tool ──
+                    // Populate the separate WriteApiToolsHandle with a method-aware
+                    // caller over a CURATED allowlist of mutating operations. The AI
+                    // never executes these — calling `temps_write` only stages a
+                    // `proposed` ai_pending_actions row; a human confirm endpoint
+                    // replays the mutation through this same router (permission_guard!
+                    // + audit). The tool itself is also gated per-project behind
+                    // projects.ai_write_actions_enabled (default OFF). This allowlist
+                    // is conservative by design: high-value, mostly-reversible
+                    // lifecycle + config operations. Adding an entry is a product +
+                    // security decision (what may the AI propose for a human to run).
+                    if let Some(write_handle) =
+                        service_context.get_service::<temps_ai_api_tools::WriteApiToolsHandle>()
+                    {
+                        let write_allowlist: Vec<String> = [
+                            // ── Deployment lifecycle (reversible / safe) ──
+                            // Redeploy the project from its configured branch —
+                            // what a "redeploy main" request maps to
+                            // (promote/rollback are NOT redeploys).
+                            "trigger_project_pipeline",
+                            "rollback_to_deployment",
+                            "promote_deployment",
+                            "pause_deployment",
+                            "resume_deployment",
+                            "cancel_deployment",
+                            // ── Manual image deploy (no git build) ──
+                            // Deploy a prebuilt Docker image by `image_ref` (a
+                            // pullable registry ref) or a registered
+                            // `external_image_id`, to a specific environment_id.
+                            // Static-bundle deploys are intentionally NOT here: the
+                            // AI can't perform the multipart file upload, so the
+                            // whole static flow (upload + deploy) lives in the
+                            // frontend.
+                            "deploy_from_image",
+                            // ── Container runtime control (reversible) ──
+                            "restart_container",
+                            "stop_container",
+                            "start_container",
+                            // ── Environment wake/sleep (reversible) ──
+                            "wake_environment",
+                            "sleep_environment",
+                            // ── Environment settings (resource limits, replicas,
+                            //    branch) — what "raise memory to 512 MB" /
+                            //    "give it more CPU" / "scale to 2 replicas" map to.
+                            //    Values are microcores (1_000_000 = 1 core) and MB.
+                            //    Reversible: it's a config change, re-applicable.
+                            "update_environment_settings",
+                            // ── Environment variables (set / change) ──
+                            "create_environment_variable",
+                            "update_environment_variable",
+                            "delete_environment_variable",
+                            // ── Domains (attach / detach at the environment level only;
+                            //    account-global domain create/delete excluded) ──
+                            "add_environment_domain",
+                            "delete_environment_domain",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                        let write_caller =
+                            temps_ai_api_tools::InternalApiCaller::new_write_allowlisted(
+                                split.admin.clone(),
+                                &openapi,
+                                write_allowlist.clone(),
+                            );
+                        // Diagnostic: report which allowlist entries actually
+                        // resolved to a real operation in the OpenAPI doc, and
+                        // loudly flag any that did not (a typo or a wrong
+                        // method/operation_id silently drops the op otherwise).
+                        let resolved = write_caller.indexed_operation_ids();
+                        let unresolved: Vec<&String> = write_allowlist
+                            .iter()
+                            .filter(|id| !resolved.contains(id))
+                            .collect();
+                        info!(
+                            resolved_count = resolved.len(),
+                            allowlist_count = write_allowlist.len(),
+                            resolved = ?resolved,
+                            "AI write tool: indexed write operations"
+                        );
+                        if !unresolved.is_empty() {
+                            tracing::warn!(
+                                ?unresolved,
+                                "AI write tool: allowlisted write operations did NOT resolve to \
+                                 an OpenAPI operation and are unavailable — check the operation_id"
+                            );
+                        }
+                        write_handle.set(write_caller);
+                        debug!("AI write tool: WriteApiToolsHandle populated (curated allowlist)");
+                    } else {
+                        debug!("AI write tool: WriteApiToolsHandle not registered; skipping");
+                    }
                 }
                 Err(e) => {
                     // Non-fatal: the AI API tools simply won't be available this

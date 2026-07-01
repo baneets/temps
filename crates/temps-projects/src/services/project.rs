@@ -59,7 +59,7 @@ pub struct EnvVarEnvironment {
     pub name: String,
 }
 
-// Constants for CPU allocation (in millicores, where 1000 = 1 CPU core).
+// Constants for CPU allocation (in microcores, where 1_000_000 = 1 CPU core).
 // Only *requests* (scheduling minimums) are defaulted; CPU/memory *limits* are
 // intentionally left unset so new projects/environments run uncapped by default.
 pub const DEFAULT_CPU_REQUEST: i32 = 500_000; // 0.5 cores
@@ -577,7 +577,15 @@ impl ProjectService {
 
     pub async fn get_projects(&self) -> Result<Vec<Project>, ProjectError> {
         let results = projects::Entity::find()
-            .order_by_desc(projects::Column::LastDeployment)
+            // Most-recently-deployed first; never-deployed projects (NULL
+            // last_deployment) sort last, not first — a NULL under DESC would
+            // otherwise be treated as "deployed infinitely recently".
+            .order_by_with_nulls(
+                projects::Column::LastDeployment,
+                sea_orm::Order::Desc,
+                sea_orm::sea_query::NullOrdering::Last,
+            )
+            .order_by_desc(projects::Column::CreatedAt)
             .all(self.db.as_ref())
             .await
             .map_err(|e| ProjectError::Other(e.to_string()))?;
@@ -725,6 +733,65 @@ impl ProjectService {
         Ok(project_found)
     }
 
+    /// Change a project's source type to a Git-less type (docker_image /
+    /// static_files / manual). Switching TO Git is rejected here because that
+    /// needs repo + provider-connection config — it goes through
+    /// [`Self::update_git_settings`] instead (which sets `source_type = Git`).
+    pub async fn set_source_type(
+        &self,
+        project_id: i32,
+        source_type: temps_entities::source_type::SourceType,
+    ) -> Result<Project, ProjectError> {
+        use temps_entities::source_type::SourceType;
+        let project = projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ProjectError::NotFound(format!(
+                "project {} not found",
+                project_id
+            )))?;
+
+        // Switching to Git is a direct flip only when a repository is already
+        // configured (repo owner + name). A project can carry git info without
+        // being Git-typed — that's a one-click switch. Otherwise the user must
+        // set a repository up first (via Git settings).
+        if matches!(source_type, SourceType::Git) {
+            let has_repo = !project.repo_owner.trim().is_empty()
+                && !project.repo_name.trim().is_empty()
+                && project.repo_owner != "unknown"
+                && project.repo_name != "unknown";
+            if !has_repo {
+                return Err(ProjectError::InvalidInput(
+                    "To switch to a Git source, configure a repository in Git settings \
+                     (a provider connection, repository, and branch are required)."
+                        .to_string(),
+                ));
+            }
+        }
+
+        let mut active_project: projects::ActiveModel = project.into();
+        active_project.source_type = Set(source_type);
+        active_project.updated_at = Set(chrono::Utc::now());
+        let updated = active_project.update(self.db.as_ref()).await?;
+        let updated = Self::map_db_project_to_project(updated);
+
+        // Deploy routing / behavior keys off source_type — notify consumers.
+        if let Err(e) = self
+            .queue_service
+            .send(Job::ProjectUpdated(ProjectUpdatedJob {
+                project_id: updated.id,
+                project_name: updated.name.clone(),
+            }))
+            .await
+        {
+            warn!(
+                "Failed to emit ProjectUpdated after source-type change for {}: {}",
+                updated.id, e
+            );
+        }
+        Ok(updated)
+    }
+
     pub async fn delete_project(
         &self,
         project_id: i32,
@@ -806,6 +873,7 @@ impl ProjectService {
         preset_config: Option<serde_json::Value>,
         ai_alert_summaries_enabled: Option<bool>,
         ai_debug_chat_enabled: Option<bool>,
+        ai_write_actions_enabled: Option<bool>,
     ) -> Result<Project, ProjectError> {
         // Validate preview env on-demand timeouts before touching the DB.
         // Mirrors DeploymentConfig::validate so the project-level defaults are
@@ -937,7 +1005,11 @@ impl ProjectService {
 
         // Update AI feature toggles if provided (ADR-021 / ADR-023). Both are
         // tri-state opt-ins (Some(true) = on), stored as nullable columns.
-        if ai_alert_summaries_enabled.is_some() || ai_debug_chat_enabled.is_some() {
+        // ai_write_actions_enabled is a non-null bool column (default false).
+        if ai_alert_summaries_enabled.is_some()
+            || ai_debug_chat_enabled.is_some()
+            || ai_write_actions_enabled.is_some()
+        {
             let project = projects::Entity::find_by_id(project_id)
                 .one(self.db.as_ref())
                 .await?
@@ -951,6 +1023,9 @@ impl ProjectService {
             }
             if let Some(v) = ai_debug_chat_enabled {
                 active_project.ai_debug_chat_enabled = Set(Some(v));
+            }
+            if let Some(v) = ai_write_actions_enabled {
+                active_project.ai_write_actions_enabled = Set(v);
             }
             active_project.update(self.db.as_ref()).await?;
         }
@@ -1205,6 +1280,10 @@ impl ProjectService {
         active_project.repo_owner = Set(repo_owner.clone());
         active_project.repo_name = Set(repo_name.clone());
         active_project.directory = Set(directory);
+        // Configuring a Git repository makes this a Git-source project — this is
+        // how a docker_image / static_files project is converted to Git (the
+        // reverse conversion goes through `set_source_type`).
+        active_project.source_type = Set(temps_entities::source_type::SourceType::Git);
 
         if let Some(preset_value) = preset {
             // Parse preset string to enum
@@ -2102,9 +2181,16 @@ impl ProjectService {
             .map_err(|e| ProjectError::DatabaseConnectionError(e.to_string()))?
             as i64;
 
-        // Get paginated projects
+        // Get paginated projects. Never-deployed projects (NULL last_deployment)
+        // sort last rather than first (a NULL under DESC would otherwise appear
+        // as the most-recently-deployed project).
         let projects = projects::Entity::find()
-            .order_by_desc(projects::Column::LastDeployment)
+            .order_by_with_nulls(
+                projects::Column::LastDeployment,
+                sea_orm::Order::Desc,
+                sea_orm::sea_query::NullOrdering::Last,
+            )
+            .order_by_desc(projects::Column::CreatedAt)
             .offset(offset)
             .limit(per_page as u64)
             .all(self.db.as_ref())
@@ -2401,6 +2487,7 @@ impl ProjectService {
             attack_mode: db_project.attack_mode,
             ai_alert_summaries_enabled: db_project.ai_alert_summaries_enabled,
             ai_debug_chat_enabled: db_project.ai_debug_chat_enabled,
+            ai_write_actions_enabled: db_project.ai_write_actions_enabled,
             enable_preview_environments: db_project.enable_preview_environments,
             preview_envs_on_demand: db_project.preview_envs_on_demand,
             preview_envs_idle_timeout_seconds: db_project.preview_envs_idle_timeout_seconds,
@@ -2524,6 +2611,9 @@ impl ProjectService {
             // not a git webhook — bypass automatic_deploy.
             manual_trigger: true,
             rollback_from_deployment_id: None,
+            // Infer the target from the branch at creation time (the default
+            // environment tracks main_branch).
+            target_environment_id: None,
         };
 
         self.queue_service
@@ -2696,6 +2786,11 @@ impl ProjectService {
             // "Deploy" button and the CLI — both are user-initiated.
             manual_trigger: true,
             rollback_from_deployment_id: None,
+            // The caller explicitly chose this environment — deploy there
+            // directly rather than re-inferring the target from the branch
+            // (which would fall through to a preview/named-preview env when the
+            // environment doesn't have the branch configured).
+            target_environment_id: Some(environment_id),
         };
 
         // Send the job to the queue
@@ -2926,6 +3021,7 @@ mod tests {
                 None,
                 None,
                 Some(Preset::Nixpacks.to_string()),
+                None,
                 None,
                 None,
                 None,

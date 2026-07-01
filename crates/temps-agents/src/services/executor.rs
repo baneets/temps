@@ -2856,6 +2856,8 @@ impl AgentExecutor {
             // created preview env.
             manual_trigger: false,
             rollback_from_deployment_id: None,
+            // Webhook-like: infer the target environment from the branch.
+            target_environment_id: None,
         });
 
         if let Err(e) = self.queue.send(push_job).await {
@@ -4081,6 +4083,7 @@ mod tests {
             attack_mode: false,
             ai_alert_summaries_enabled: None,
             ai_debug_chat_enabled: None,
+            ai_write_actions_enabled: false,
             enable_preview_environments: true,
             preview_envs_on_demand: false,
             preview_envs_idle_timeout_seconds: 300,

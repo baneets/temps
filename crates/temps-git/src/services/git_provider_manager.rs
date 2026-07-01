@@ -4359,6 +4359,8 @@ impl GitProviderManager {
                 // Real git provider webhook — honour automatic_deploy.
                 manual_trigger: false,
                 rollback_from_deployment_id: None,
+                // Webhook: infer the target environment(s) from the branch.
+                target_environment_id: None,
             };
 
             if let Err(e) = self

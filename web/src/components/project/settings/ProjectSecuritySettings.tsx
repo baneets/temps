@@ -60,6 +60,7 @@ interface FormData {
   attack_mode?: boolean
   ai_debug_chat_enabled?: boolean
   ai_alert_summaries_enabled?: boolean
+  ai_write_actions_enabled?: boolean
 }
 
 export function ProjectSecuritySettings({
@@ -92,6 +93,7 @@ export function ProjectSecuritySettings({
       attack_mode: project.attack_mode ?? false,
       ai_debug_chat_enabled: project.ai_debug_chat_enabled ?? false,
       ai_alert_summaries_enabled: project.ai_alert_summaries_enabled ?? false,
+      ai_write_actions_enabled: project.ai_write_actions_enabled ?? false,
       security: {
         enabled: project.deployment_config?.security?.enabled ?? undefined,
         headers: {
@@ -139,6 +141,7 @@ export function ProjectSecuritySettings({
         attack_mode?: boolean
         ai_debug_chat_enabled?: boolean
         ai_alert_summaries_enabled?: boolean
+        ai_write_actions_enabled?: boolean
       } = {}
       if (data.attack_mode !== project.attack_mode) {
         projectSettings.attack_mode = data.attack_mode
@@ -155,6 +158,13 @@ export function ProjectSecuritySettings({
       ) {
         projectSettings.ai_alert_summaries_enabled =
           data.ai_alert_summaries_enabled
+      }
+      if (
+        (data.ai_write_actions_enabled ?? false) !==
+        (project.ai_write_actions_enabled ?? false)
+      ) {
+        projectSettings.ai_write_actions_enabled =
+          data.ai_write_actions_enabled
       }
 
       if (Object.keys(projectSettings).length > 0) {
@@ -354,6 +364,26 @@ export function ProjectSecuritySettings({
               checked={watch('ai_alert_summaries_enabled') ?? false}
               onCheckedChange={(checked) =>
                 setValue('ai_alert_summaries_enabled', checked, {
+                  shouldDirty: true,
+                })
+              }
+            />
+          </div>
+          <Separator />
+          <div className="flex items-center justify-between">
+            <div className="space-y-0.5">
+              <Label htmlFor="ai-write-actions">AI write actions</Label>
+              <p className="text-sm text-muted-foreground">
+                Let the AI assistant <strong>propose</strong> changes
+                (redeploys, env vars, domains). Nothing runs automatically —
+                every action waits for you to review and confirm it in chat.
+              </p>
+            </div>
+            <Switch
+              id="ai-write-actions"
+              checked={watch('ai_write_actions_enabled') ?? false}
+              onCheckedChange={(checked) =>
+                setValue('ai_write_actions_enabled', checked, {
                   shouldDirty: true,
                 })
               }
