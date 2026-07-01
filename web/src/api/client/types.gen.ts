@@ -1417,6 +1417,29 @@ export type BackupScheduleResponse = {
 };
 
 /**
+ * Authentication input for a Bitbucket Cloud provider. Use `access_token` for
+ * a Repository or Workspace Access Token (PAT), or `username` + `app_password`
+ * for App Password (HTTP Basic) authentication.
+ */
+export type BitbucketAuthInput = {
+    /**
+     * The Bitbucket access token value.
+     */
+    token: string;
+    type: 'access_token';
+} | {
+    /**
+     * App password generated in Bitbucket security settings.
+     */
+    password: string;
+    type: 'app_password';
+    /**
+     * Bitbucket account username.
+     */
+    username: string;
+};
+
+/**
  * Response after uploading a blob
  */
 export type BlobResponse = {
@@ -2722,6 +2745,17 @@ export type CreateBackupScheduleRequest = {
     target_all_services?: boolean | null;
 };
 
+export type CreateBitbucketRequest = {
+    /**
+     * Authentication credentials — either an access token or an app password.
+     */
+    auth: BitbucketAuthInput;
+    /**
+     * Display name for this provider.
+     */
+    name: string;
+};
+
 export type CreateCloudflareProviderRequest = {
     config: CloudflareConfig;
     enabled?: boolean | null;
@@ -2874,6 +2908,30 @@ export type CreateFunnelStep = {
     event_name: string;
 };
 
+export type CreateGenericRequest = {
+    /**
+     * Optional base URL of the git host for display purposes (no API is called).
+     */
+    base_url?: string | null;
+    /**
+     * HTTPS clone URL for the repository, e.g. `https://git.example.com/org/repo.git`.
+     */
+    clone_url: string;
+    /**
+     * Display name for this provider.
+     */
+    name: string;
+    /**
+     * Access token or password. Omit (or set to `null`) for public repositories.
+     */
+    token?: string | null;
+    /**
+     * HTTP Basic username used with the token. Defaults to `x-access-token` when
+     * absent or empty. Ignored for public (unauthenticated) repositories.
+     */
+    token_username?: string | null;
+};
+
 export type CreateGitHubPatRequest = {
     name: string;
     token: string;
@@ -2890,6 +2948,21 @@ export type CreateGitLabOAuthRequest = {
 export type CreateGitLabPatRequest = {
     base_url?: string | null;
     name: string;
+    token: string;
+};
+
+export type CreateGiteaPatRequest = {
+    /**
+     * HTTPS base URL of the Gitea instance, e.g. `https://git.example.com`.
+     */
+    base_url: string;
+    /**
+     * Display name for this provider.
+     */
+    name: string;
+    /**
+     * Personal access token issued by the Gitea instance.
+     */
     token: string;
 };
 
@@ -26599,6 +26672,111 @@ export type CreateGitProviderResponses = {
 };
 
 export type CreateGitProviderResponse = CreateGitProviderResponses[keyof CreateGitProviderResponses];
+
+export type CreateBitbucketProviderData = {
+    body: CreateBitbucketRequest;
+    path?: never;
+    query?: never;
+    url: '/git-providers/bitbucket';
+};
+
+export type CreateBitbucketProviderErrors = {
+    /**
+     * Bad request — missing or invalid auth fields
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateBitbucketProviderResponses = {
+    /**
+     * Bitbucket provider created successfully
+     */
+    201: ProviderResponse;
+};
+
+export type CreateBitbucketProviderResponse = CreateBitbucketProviderResponses[keyof CreateBitbucketProviderResponses];
+
+export type CreateGenericProviderData = {
+    body: CreateGenericRequest;
+    path?: never;
+    query?: never;
+    url: '/git-providers/generic';
+};
+
+export type CreateGenericProviderErrors = {
+    /**
+     * Bad request — invalid clone URL or missing fields
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateGenericProviderResponses = {
+    /**
+     * Generic git provider created successfully
+     */
+    201: ProviderResponse;
+};
+
+export type CreateGenericProviderResponse = CreateGenericProviderResponses[keyof CreateGenericProviderResponses];
+
+export type CreateGiteaPatProviderData = {
+    body: CreateGiteaPatRequest;
+    path?: never;
+    query?: never;
+    url: '/git-providers/gitea/pat';
+};
+
+export type CreateGiteaPatProviderErrors = {
+    /**
+     * Bad request — invalid URL or missing fields
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateGiteaPatProviderResponses = {
+    /**
+     * Gitea PAT provider created successfully
+     */
+    201: ProviderResponse;
+};
+
+export type CreateGiteaPatProviderResponse = CreateGiteaPatProviderResponses[keyof CreateGiteaPatProviderResponses];
 
 export type CreateGithubPatProviderData = {
     body: CreateGitHubPatRequest;
