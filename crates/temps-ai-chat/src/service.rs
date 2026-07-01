@@ -527,6 +527,19 @@ impl ConversationService {
                     .await,
             );
         }
+        // Merge Git-repository exploration tools from the sentinel provider.
+        // Gated only by the project having a Git connection (the provider
+        // returns an empty vec when not connected). Available in every context
+        // (project, alert, deployment, error-group, …) so the model can always
+        // explore the source tree when a repo is connected, regardless of which
+        // context_type seeded the chat.
+        if let Some(repo_tools_provider) = self.providers.get("__repo_tools__") {
+            tools.extend(
+                repo_tools_provider
+                    .tools(conv.project_id, &conv.context_id)
+                    .await,
+            );
+        }
 
         // Write tool: offered only when write support is wired AND the project
         // has opted in. Checking `ai_write_actions_enabled` here (once per turn,
@@ -753,6 +766,7 @@ impl ConversationService {
         let ai = self.ai.clone();
         let db = self.db.clone();
         let api_tools = self.providers.get("__api_tools__").cloned();
+        let repo_tools = self.providers.get("__repo_tools__").cloned();
         let conv_id = conv.id;
         let project_id = conv.project_id;
         let context_type = conv.context_type.clone();
@@ -946,6 +960,30 @@ impl ConversationService {
                             } else {
                                 format!(
                                     "Tool '{}' is not available (API tools provider absent).",
+                                    tc.name
+                                )
+                            }
+                        } else if matches!(
+                            tc.name.as_str(),
+                            "read_repo_file"
+                                | "list_repo_dir"
+                                | "list_repo_branches"
+                                | "list_repo_tags"
+                        ) {
+                            // Route Git-repo exploration tools to the sentinel
+                            // provider rather than the context provider, so the
+                            // model can explore the source tree in any context.
+                            if let Some(rt) = &repo_tools {
+                                rt.execute_tool(
+                                    project_id,
+                                    &context_id,
+                                    &tc.name,
+                                    &tc.arguments,
+                                )
+                                .await
+                            } else {
+                                format!(
+                                    "Tool '{}' is not available (repo tools provider absent).",
                                     tc.name
                                 )
                             }

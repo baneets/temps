@@ -23,6 +23,7 @@ use crate::providers::alert::AlertChatProvider;
 use crate::providers::api_tools::ApiToolsProvider;
 use crate::providers::deployment::DeploymentChatProvider;
 use crate::providers::project::ProjectChatProvider;
+use crate::providers::repo_tools::RepoToolsProvider;
 use crate::ConversationService;
 
 pub struct AiChatPlugin;
@@ -55,8 +56,8 @@ impl TempsPlugin for AiChatPlugin {
             // Audit logger for chat write operations (registered by AuditPlugin,
             // which loads well before this plugin).
             let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
-            // Optional: read-only repo access for the deployment debugger's
-            // `read_repo_file` tool. Absent → the tool simply isn't offered.
+            // Optional: read-only repo access via the Git provider, used by the
+            // RepoToolsProvider sentinel. Absent → the sentinel offers no tools.
             let git = context.get_service::<temps_git::GitProviderManager>();
 
             // ADR-024: Register the shared ApiToolsHandle (read-only).
@@ -92,7 +93,7 @@ impl TempsPlugin for AiChatPlugin {
             // Built-in providers (one per context_type). Future context types add
             // their provider here (or via a registry once there are many).
             let providers: Vec<Arc<dyn ConversationContextProvider>> = vec![
-                Arc::new(DeploymentChatProvider::new(db.clone(), log_service, git)),
+                Arc::new(DeploymentChatProvider::new(db.clone(), log_service)),
                 Arc::new(AlertChatProvider::new(db.clone())),
                 Arc::new(ProjectChatProvider::new(db.clone())),
                 // ADR-024: generic API meta-tools (search_api, describe_api, call_api).
@@ -100,6 +101,11 @@ impl TempsPlugin for AiChatPlugin {
                 // primary provider, but its tools() output is merged into every context
                 // by the ConversationService tool-gathering loop.
                 Arc::new(ApiToolsProvider::new(api_tools_handle)),
+                // Git-repository exploration tools (read_repo_file, list_repo_dir,
+                // list_repo_branches, list_repo_tags). Uses the sentinel "__repo_tools__"
+                // — merged into every context when the project has a Git connection.
+                // `git = None` → the sentinel offers no tools (graceful degradation).
+                Arc::new(RepoToolsProvider::new(db.clone(), git)),
             ];
 
             let service = Arc::new(
