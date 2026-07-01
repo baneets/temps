@@ -453,7 +453,10 @@ function WriteActionsEnabler({ projectId }: { projectId: number }) {
     try {
       const { error } = await updateProjectSettings({
         path: { project_id: projectId },
-        body: { ai_write_actions_enabled: true },
+        // Enable the read-only chat too, so a project never ends up with write
+        // actions on but the chat itself off (the chat is where you propose and
+        // confirm those writes).
+        body: { ai_write_actions_enabled: true, ai_debug_chat_enabled: true },
       })
       if (error) throw error
       setEnabled(true)

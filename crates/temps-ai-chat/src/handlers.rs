@@ -351,11 +351,15 @@ impl From<ai_pending_actions::Model> for PendingActionResponse {
     }
 }
 
-/// Toggle-only gate: the project must have opted into AI debug chat
-/// (`ai_debug_chat_enabled == Some(true)`). Used by the read/archive handlers so
-/// that disabling the feature consistently revokes access (returns 403) to
-/// existing chat content — reading or archiving history must not require an AI
-/// provider to be configured, only the per-project toggle.
+/// Toggle-only gate: the project must have opted into AI use — either the
+/// read-only debug chat (`ai_debug_chat_enabled`) OR write actions
+/// (`ai_write_actions_enabled`). Write actions are *proposed and confirmed
+/// inside this chat*, so enabling the more-privileged capability must never
+/// block the chat itself (otherwise a project with write on but debug-chat off
+/// could never open the chat to use it). Used by the read/archive handlers so
+/// that disabling both consistently revokes access (403) to existing chat
+/// content — reading/archiving history must not require an AI provider to be
+/// configured, only a per-project opt-in.
 async fn ensure_chat_enabled(db: &DatabaseConnection, project_id: i32) -> Result<(), Problem> {
     let project = temps_entities::projects::Entity::find_by_id(project_id)
         .one(db)
@@ -364,11 +368,13 @@ async fn ensure_chat_enabled(db: &DatabaseConnection, project_id: i32) -> Result
             problemdetails::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
                 .with_detail(e.to_string())
         })?;
-    let enabled = matches!(project.and_then(|p| p.ai_debug_chat_enabled), Some(true));
+    let enabled = project
+        .map(|p| matches!(p.ai_debug_chat_enabled, Some(true)) || p.ai_write_actions_enabled)
+        .unwrap_or(false);
     if !enabled {
         return Err(problemdetails::new(axum::http::StatusCode::FORBIDDEN)
-            .with_title("AI Debug Chat Disabled")
-            .with_detail("Enable AI debug chat for this project to use it."));
+            .with_title("AI Chat Disabled")
+            .with_detail("Enable AI chat for this project to use it."));
     }
     Ok(())
 }
@@ -1073,6 +1079,22 @@ mod tests {
     async fn test_ensure_chat_enabled_allows_when_toggle_on() {
         let db = db_returning(Some(project_with_toggle(7, Some(true))));
         assert!(ensure_chat_enabled(&db, 7).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_allows_when_write_actions_on_even_if_chat_off() {
+        // Write actions are proposed + confirmed inside the chat, so enabling
+        // them must never leave the chat itself unreachable, regardless of the
+        // read-only debug-chat toggle (off or NULL).
+        for chat_toggle in [None, Some(false)] {
+            let mut p = project_with_toggle(7, chat_toggle);
+            p.ai_write_actions_enabled = true;
+            let db = db_returning(Some(p));
+            assert!(
+                ensure_chat_enabled(&db, 7).await.is_ok(),
+                "write actions on must allow the chat (chat toggle {chat_toggle:?})"
+            );
+        }
     }
 
     #[tokio::test]
