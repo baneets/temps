@@ -2,7 +2,19 @@ import {
   createConversation,
   findConversation,
   getConversation,
+  getProject,
+  updateProjectSettings,
 } from '@/api/client'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
@@ -22,6 +34,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -402,6 +415,104 @@ function PendingActionCard({
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * A slim, in-chat affordance to turn on AI *write actions* for this project —
+ * shown only while they're off. Enabling is a deliberate, security-sensitive
+ * step (it lets the AI PROPOSE mutations), so it goes through a confirmation
+ * dialog rather than a bare toggle; every proposed action is still individually
+ * confirm-gated at execution time. This removes the trip to Settings without
+ * cheapening the opt-in.
+ */
+function WriteActionsEnabler({ projectId }: { projectId: number }) {
+  // null = still loading / unknown; true = on (render nothing); false = off.
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    getProject({ path: { id: projectId } })
+      .then(({ data }) => {
+        if (!cancelled && data) {
+          setEnabled(data.ai_write_actions_enabled === true)
+        }
+      })
+      .catch(() => {
+        /* leave unknown — just don't show the affordance */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  const enable = async () => {
+    setBusy(true)
+    try {
+      const { error } = await updateProjectSettings({
+        path: { project_id: projectId },
+        body: { ai_write_actions_enabled: true },
+      })
+      if (error) throw error
+      setEnabled(true)
+      setConfirmOpen(false)
+      toast.success('AI write actions enabled for this project')
+    } catch {
+      toast.error(
+        "Couldn't enable write actions — you may need project admin permission."
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Hidden while loading, unknown, or already enabled.
+  if (enabled !== false) return null
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirmOpen(true)}
+        className="flex w-full items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5 text-left text-xs text-amber-700 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+      >
+        <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">
+          Read-only. <span className="font-medium">Enable write actions</span> to
+          let the AI propose changes.
+        </span>
+      </button>
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable AI write actions?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This lets the assistant <strong>propose</strong> changes to this
+              project — redeploys, restarts, environment variables, domains.
+              Nothing runs automatically: every proposed action waits for you to
+              review and <strong>Confirm</strong> it here in the chat, and runs
+              with your own permissions. You can turn this off anytime in
+              Settings → Security.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                void enable()
+              }}
+              disabled={busy}
+            >
+              {busy && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+              Enable write actions
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }
 
@@ -1033,6 +1144,8 @@ export function DebugChatPanel({
             : `Share context: ${pageContext.label}`}
         </button>
       )}
+
+      <WriteActionsEnabler projectId={projectId} />
 
       <div className="flex items-end gap-2 border-t pt-3">
         <Textarea
