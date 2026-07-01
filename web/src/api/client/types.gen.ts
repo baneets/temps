@@ -1672,6 +1672,15 @@ export type ChangePasswordRequest = {
     revoke_other_sessions?: boolean;
 };
 
+/**
+ * Change a project's source type to a Git-less type (docker_image /
+ * static_files / manual). Switching TO `git` is done via the Git settings
+ * endpoint (which also supplies the repository + provider connection).
+ */
+export type ChangeProjectSourceRequest = {
+    source_type: SourceType;
+};
+
 export type ChatCompletionChoice = {
     finish_reason?: string | null;
     index: number;
@@ -10179,10 +10188,19 @@ export type PendingActionResponse = {
      * The flat params to be replayed at execute time (shown pre-execution for review).
      */
     params: unknown;
+    /**
+     * Set when this action is one step of a multi-step plan (chained actions);
+     * all steps of the plan share this id. Absent for standalone single actions.
+     */
+    plan_public_id?: string | null;
     public_id: string;
     required_permission?: string | null;
     result?: unknown;
     status: string;
+    /**
+     * 0-based order of this step within its plan (0 for standalone actions).
+     */
+    step_index: number;
     summary: string;
 };
 
@@ -32159,6 +32177,50 @@ export type GetLastDeploymentResponses = {
 };
 
 export type GetLastDeploymentResponse = GetLastDeploymentResponses[keyof GetLastDeploymentResponses];
+
+export type ChangeProjectSourceData = {
+    body: ChangeProjectSourceRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/projects/{id}/source';
+};
+
+export type ChangeProjectSourceErrors = {
+    /**
+     * Invalid source type change (e.g. switching to Git here)
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ChangeProjectSourceResponses = {
+    /**
+     * Source type changed
+     */
+    200: ProjectResponse;
+};
+
+export type ChangeProjectSourceResponse = ChangeProjectSourceResponses[keyof ChangeProjectSourceResponses];
 
 export type TriggerProjectPipelineData = {
     body: TriggerPipelinePayload;
