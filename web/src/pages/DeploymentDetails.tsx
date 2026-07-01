@@ -25,16 +25,19 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { ReloadableImage } from '@/components/utils/ReloadableImage'
+import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useAssistantPageContext } from '@/components/ai/AiAssistantContext'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { formatLocalDate } from '@/lib/date'
-import { cn, formatBytes } from '@/lib/utils'
+import { formatMicrocores } from '@/lib/cpu-format'
+import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertTriangle,
   ArrowLeft,
   Camera,
   CheckCircle2,
+  Clock,
   ExternalLink,
   GitBranch,
   GitCommitHorizontal,
@@ -141,25 +144,9 @@ function buildSummaryStats(deployment: DeploymentResponse): StatItem[] {
       value: formatRange(deployment.created_at, deployment.finished_at),
     })
   }
-  if (md?.imageSizeBytes != null && md.imageSizeBytes > 0) {
-    stats.push({ label: 'Image size', value: formatBytes(md.imageSizeBytes) })
-  }
-  if (md?.fileCount != null) {
-    stats.push({ label: 'Files', value: md.fileCount.toLocaleString() })
-  }
   return stats
 }
 
-function Stat({ label, value }: StatItem) {
-  return (
-    <div className="space-y-1">
-      <dt className="truncate text-sm font-medium text-foreground">{label}</dt>
-      <dd className="text-2xl font-semibold tabular-nums tracking-tight text-foreground">
-        {value}
-      </dd>
-    </div>
-  )
-}
 
 function Field({
   label,
@@ -393,32 +380,23 @@ function SecondaryActions({
   )
 }
 
+// Top-level failure/cancellation banner shown directly under the header for
+// deployments that didn't succeed.
 function CancelledReason({ deployment }: { deployment: DeploymentResponse }) {
   if (!deployment.cancelled_reason) return null
+  const isCancelled = deployment.status === 'cancelled'
   return (
-    <div className="flex items-start gap-2">
-      <div className="flex-1 border-l-2 border-destructive/50 pl-3 text-sm text-destructive">
-        <div className="mb-1 font-medium">Cancellation Reason</div>
-        <div className="text-sm text-destructive/80">
+    <div className="flex items-start gap-2.5 rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-destructive">
+          {isCancelled ? 'Deployment cancelled' : 'Deployment failed'}
+        </p>
+        <p className="mt-0.5 break-words text-sm text-destructive/80">
           {deployment.cancelled_reason}
-        </div>
+        </p>
       </div>
     </div>
-  )
-}
-
-function BuildStatsCard({ stats }: { stats: StatItem[] }) {
-  if (stats.length === 0) return null
-  return (
-    <Card>
-      <CardContent className="p-6">
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-5">
-          {stats.map((stat) => (
-            <Stat key={stat.label} label={stat.label} value={stat.value} />
-          ))}
-        </dl>
-      </CardContent>
-    </Card>
   )
 }
 
@@ -465,66 +443,6 @@ function DeploymentUrlsCard({
         </div>
       </CardContent>
     </Card>
-  )
-}
-
-// Compact one-line commit summary with deep links to the git provider.
-function CommitStrip({
-  deployment,
-  commitUrls,
-}: {
-  deployment: DeploymentResponse
-  commitUrls: CommitUrls
-}) {
-  if (
-    !deployment.commit_hash &&
-    !deployment.commit_message &&
-    !deployment.branch
-  ) {
-    return null
-  }
-  const shortHash = deployment.commit_hash?.slice(0, 7)
-  const firstLine = deployment.commit_message?.split('\n')[0]
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-gray-950/5 bg-muted/30 px-3 py-2 text-sm">
-      <GitCommitHorizontal className="h-4 w-4 shrink-0 text-muted-foreground" />
-      {shortHash &&
-        (commitUrls.commit ? (
-          <a
-            href={commitUrls.commit}
-            target="_blank"
-            rel="noreferrer"
-            className="shrink-0 font-mono font-medium text-foreground hover:underline"
-          >
-            {shortHash}
-          </a>
-        ) : (
-          <span className="shrink-0 font-mono font-medium text-foreground">
-            {shortHash}
-          </span>
-        ))}
-      {firstLine && (
-        <span className="min-w-0 flex-1 truncate text-muted-foreground">
-          {firstLine}
-        </span>
-      )}
-      {deployment.branch && (
-        <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          <GitBranch className="h-3.5 w-3.5" />
-          {deployment.branch}
-        </span>
-      )}
-      {deployment.commit_author && (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {deployment.commit_author}
-        </span>
-      )}
-      {deployment.commit_date && (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {formatLocalDate(deployment.commit_date)}
-        </span>
-      )}
-    </div>
   )
 }
 
@@ -626,17 +544,226 @@ function BrowserFrameScreenshot({
   )
 }
 
-// The deployment overview — a screenshot-led hero where the live preview, the
-// environment URL, and commit info are the focal point.
-function DeploymentOverview(p: OverviewProps) {
-  const { deployment, project, primaryUrl, urlEntries, buildStats } = p
+// Unified deployment header: back link, status/environment badges, and the
+// commit summary (hash + message + branch) all on a single row, with the
+// primary + secondary actions on the right — above a single divider so the
+// page's substantive content (preview, timings, config, stages) starts
+// immediately after it.
+function DeploymentHeader({
+  project,
+  deployment,
+  isLive,
+  primaryUrl,
+  wasDeployed,
+  commitUrls,
+  buildStats,
+  actions,
+}: {
+  project: ProjectResponse
+  deployment: DeploymentResponse
+  isLive: boolean
+  primaryUrl: string | null
+  wasDeployed: boolean
+  commitUrls: CommitUrls
+  buildStats: StatItem[]
+  actions: OverviewActions
+}) {
+  const shortHash = deployment.commit_hash?.slice(0, 7)
+  const firstLine = deployment.commit_message?.split('\n')[0]
+  const hasCommit = Boolean(shortHash || firstLine || deployment.branch)
+  return (
+    <div className="flex flex-col gap-3 border-b border-gray-950/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 flex-1 items-center gap-x-3">
+        <Button
+          variant="ghost"
+          size="sm"
+          asChild
+          className="-ml-2 h-8 shrink-0 gap-1.5 px-2 text-muted-foreground"
+        >
+          <Link to={`/projects/${project.slug}/deployments`}>
+            <ArrowLeft className="h-4 w-4" />
+            Back
+          </Link>
+        </Button>
+        <span
+          className="hidden h-5 w-px shrink-0 bg-gray-950/10 sm:block"
+          aria-hidden="true"
+        />
+        <div className="shrink-0">
+          <StatusBadges deployment={deployment} isLive={isLive} />
+        </div>
+        {hasCommit && (
+          <>
+            <span
+              className="hidden h-5 w-px shrink-0 bg-gray-950/10 sm:block"
+              aria-hidden="true"
+            />
+            <GitCommitHorizontal className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />
+            {shortHash &&
+              (commitUrls.commit ? (
+                <a
+                  href={commitUrls.commit}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hidden shrink-0 font-mono text-sm font-medium text-foreground hover:underline sm:inline"
+                >
+                  {shortHash}
+                </a>
+              ) : (
+                <span className="hidden shrink-0 font-mono text-sm font-medium text-foreground sm:inline">
+                  {shortHash}
+                </span>
+              ))}
+            {firstLine && (
+              <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                {firstLine}
+              </span>
+            )}
+            {deployment.branch && (
+              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                <GitBranch className="h-3.5 w-3.5" />
+                {deployment.branch}
+              </span>
+            )}
+          </>
+        )}
+        {buildStats.length > 0 && (
+          <span className="ml-auto hidden shrink-0 items-center gap-2 pl-3 text-xs text-muted-foreground lg:flex">
+            <Clock className="h-3.5 w-3.5" />
+            {buildStats.map((stat, i) => (
+              <span key={stat.label} className="inline-flex items-center gap-1">
+                {i > 0 && (
+                  <span className="text-muted-foreground/40">·</span>
+                )}
+                <span>{stat.label}</span>
+                <span className="font-medium tabular-nums text-foreground">
+                  {stat.value}
+                </span>
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {wasDeployed && primaryUrl && <VisitButton url={primaryUrl} />}
+        <SecondaryActions deployment={deployment} actions={actions} />
+      </div>
+    </div>
+  )
+}
+
+function statusDotClass(status: string): string {
+  switch (status) {
+    case 'completed':
+      return 'bg-emerald-500'
+    case 'failed':
+      return 'bg-red-500'
+    case 'cancelled':
+      return 'bg-gray-400'
+    case 'running':
+    case 'pending':
+      return 'bg-blue-500 animate-pulse'
+    case 'paused':
+      return 'bg-yellow-500'
+    default:
+      return 'bg-gray-400'
+  }
+}
+
+// Stacked label→value row for the Vercel-style details panel; handles
+// multi-line values (domains, commit) gracefully.
+function DetailRow({
+  label,
+  children,
+}: {
+  label: string
+  children: ReactNode
+}) {
+  return (
+    <div className="space-y-1">
+      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="text-sm text-foreground">{children}</dd>
+    </div>
+  )
+}
+
+// Shared commit/source block used by the Vercel variants' details panel.
+function SourceDetail({
+  deployment,
+  commitUrls,
+}: {
+  deployment: DeploymentResponse
+  commitUrls: CommitUrls
+}) {
+  const shortHash = deployment.commit_hash?.slice(0, 7)
+  const firstLine = deployment.commit_message?.split('\n')[0]
+  return (
+    <div className="space-y-1.5">
+      {deployment.branch && (
+        <p className="flex items-center gap-1.5 text-muted-foreground">
+          <GitBranch className="h-3.5 w-3.5 shrink-0" />
+          {commitUrls.branch ? (
+            <a
+              href={commitUrls.branch}
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-foreground hover:underline"
+            >
+              {deployment.branch}
+            </a>
+          ) : (
+            <span className="font-medium text-foreground">
+              {deployment.branch}
+            </span>
+          )}
+        </p>
+      )}
+      {(shortHash || firstLine) && (
+        <p className="flex items-start gap-1.5">
+          <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0">
+            {shortHash &&
+              (commitUrls.commit ? (
+                <a
+                  href={commitUrls.commit}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-xs text-muted-foreground hover:underline"
+                >
+                  {shortHash}
+                </a>
+              ) : (
+                <span className="font-mono text-xs text-muted-foreground">
+                  {shortHash}
+                </span>
+              ))}{' '}
+            <span className="text-foreground">{firstLine}</span>
+          </span>
+        </p>
+      )}
+      {deployment.commit_author && (
+        <p className="text-xs text-muted-foreground">
+          by {deployment.commit_author}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ----- Option 1: Classic (current) -----------------------------------------
+// A screenshot-led hero where the live preview, the environment URL, and commit
+// info are the focal point, stacked vertically.
+function OverviewClassic(p: OverviewProps) {
+  const { deployment, project, primaryUrl, urlEntries } = p
   // A failed/cancelled/in-progress deployment was never served, so its URL,
   // preview, and Visit affordances are meaningless — only show them once the
   // deployment has actually been deployed (completed, or completed-then-paused).
   const wasDeployed =
     deployment.status === 'completed' || deployment.status === 'paused'
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {wasDeployed && (
         <BrowserFrameScreenshot
           deployment={deployment}
@@ -645,21 +772,194 @@ function DeploymentOverview(p: OverviewProps) {
           screenshotsEnabled={p.screenshotsEnabled}
         />
       )}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <StatusBadges deployment={deployment} isLive={p.isLive} />
-        <div className="flex items-center gap-2">
-          {wasDeployed && primaryUrl && <VisitButton url={primaryUrl} />}
-          <SecondaryActions deployment={deployment} actions={p.actions} />
-        </div>
-      </div>
-      <CommitStrip deployment={deployment} commitUrls={p.commitUrls} />
-      <CancelledReason deployment={deployment} />
-      <BuildStatsCard stats={buildStats} />
       {/* Only list URLs when there's more than the primary already shown in the
           frame's address bar (e.g. extra preview/custom domains). */}
       {wasDeployed && urlEntries.length > 1 && (
         <DeploymentUrlsCard entries={urlEntries} />
       )}
+    </div>
+  )
+}
+
+// ----- Option 2: Vercel Two-Column ------------------------------------------
+// Vercel's signature deployment page: the preview leads a wide main column,
+// with a sticky "Deployment Details" panel (status, domains, source, timings)
+// on the right.
+function OverviewVercelTwoColumn(p: OverviewProps) {
+  const { deployment, project, primaryUrl, urlEntries, buildStats, commitUrls } =
+    p
+  const wasDeployed =
+    deployment.status === 'completed' || deployment.status === 'paused'
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <div className="space-y-4 lg:col-span-2">
+        {wasDeployed && (
+          <BrowserFrameScreenshot
+            deployment={deployment}
+            project={project}
+            url={primaryUrl}
+            screenshotsEnabled={p.screenshotsEnabled}
+          />
+        )}
+          {wasDeployed && urlEntries.length > 1 && (
+          <DeploymentUrlsCard entries={urlEntries} />
+        )}
+      </div>
+      <div className="lg:col-span-1">
+        <Card className="lg:sticky lg:top-4">
+          <CardContent className="space-y-4 p-6">
+            <h2 className="text-base font-semibold">Deployment Details</h2>
+            <dl className="grid gap-4">
+              <DetailRow label="Status">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'h-2 w-2 rounded-full',
+                      statusDotClass(deployment.status)
+                    )}
+                  />
+                  <span className="capitalize">{deployment.status}</span>
+                  {deployment.is_current && (
+                    <Badge variant="success" className="ml-1">
+                      Current
+                    </Badge>
+                  )}
+                </div>
+              </DetailRow>
+              {deployment.environment && (
+                <DetailRow label="Environment">
+                  <span className="capitalize">
+                    {deployment.environment.name}
+                  </span>
+                </DetailRow>
+              )}
+              {wasDeployed && urlEntries.length > 0 && (
+                <DetailRow label="Domains">
+                  <div className="flex flex-col gap-1">
+                    {urlEntries.map((entry) => (
+                      <a
+                        key={entry.url}
+                        href={entry.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 hover:underline"
+                      >
+                        <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate">{entry.display}</span>
+                      </a>
+                    ))}
+                  </div>
+                </DetailRow>
+              )}
+              <DetailRow label="Created">
+                <TimeAgo date={deployment.created_at} />
+              </DetailRow>
+              {(deployment.branch ||
+                deployment.commit_hash ||
+                deployment.commit_message) && (
+                <DetailRow label="Source">
+                  <SourceDetail
+                    deployment={deployment}
+                    commitUrls={commitUrls}
+                  />
+                </DetailRow>
+              )}
+              {buildStats.length > 0 && (
+                <DetailRow label="Timing">
+                  <div className="flex flex-col gap-1">
+                    {buildStats.map((stat) => (
+                      <div
+                        key={stat.label}
+                        className="flex items-center justify-between gap-3"
+                      >
+                        <span className="text-muted-foreground">
+                          {stat.label}
+                        </span>
+                        <span className="tabular-nums">{stat.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </DetailRow>
+              )}
+            </dl>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
+// ----- Option 3: Vercel Summary ---------------------------------------------
+// Vercel's "Deployment Summary" framing: a status banner up top, then a
+// horizontal stat strip, then the preview and URLs.
+function OverviewVercelSummary(p: OverviewProps) {
+  const { deployment, project, primaryUrl, urlEntries } = p
+  const wasDeployed =
+    deployment.status === 'completed' || deployment.status === 'paused'
+  const statusLabel =
+    deployment.status === 'completed' ? 'Ready' : deployment.status
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span
+              className={cn(
+                'h-3 w-3 rounded-full',
+                statusDotClass(deployment.status)
+              )}
+            />
+            <div>
+              <p className="text-lg font-semibold capitalize">{statusLabel}</p>
+              <p className="text-sm text-muted-foreground">
+                <TimeAgo date={deployment.created_at} />
+                {deployment.environment && (
+                  <> · {deployment.environment.name}</>
+                )}
+              </p>
+            </div>
+          </div>
+          {wasDeployed && primaryUrl && <VisitButton url={primaryUrl} />}
+        </CardContent>
+      </Card>
+      {wasDeployed && (
+        <BrowserFrameScreenshot
+          deployment={deployment}
+          project={project}
+          url={primaryUrl}
+          screenshotsEnabled={p.screenshotsEnabled}
+        />
+      )}
+      {wasDeployed && urlEntries.length > 1 && (
+        <DeploymentUrlsCard entries={urlEntries} />
+      )}
+    </div>
+  )
+}
+
+// Picker wrapper: compare Vercel-style deployment-detail layouts in-browser.
+function DeploymentOverview(p: OverviewProps) {
+  return (
+    <div data-uidotsh-pick="Deployment detail layout" className="contents">
+      <div data-uidotsh-option="Classic (current)" className="contents">
+        <OverviewClassic {...p} />
+      </div>
+      <div
+        data-uidotsh-option="Vercel Two-Column"
+        className="contents"
+        hidden
+        style={{ display: 'none' }}
+      >
+        <OverviewVercelTwoColumn {...p} />
+      </div>
+      <div
+        data-uidotsh-option="Vercel Summary"
+        className="contents"
+        hidden
+        style={{ display: 'none' }}
+      >
+        <OverviewVercelSummary {...p} />
+      </div>
     </div>
   )
 }
@@ -1003,51 +1303,15 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
         md.imageUploadedLocally)
   )
 
-  const resourceCells: { label: string; value: ReactNode; mono?: boolean }[] =
-    []
+  // The resource facts worth surfacing, as compact chips: CPU + memory request
+  // and replica count. Limits, exposed port, and feature toggles are omitted.
+  const resourceBadges: string[] = []
   if (cfg?.cpuRequest != null)
-    resourceCells.push({ label: 'CPU request', value: `${cfg.cpuRequest}m` })
-  if (cfg?.cpuLimit != null)
-    resourceCells.push({ label: 'CPU limit', value: `${cfg.cpuLimit}m` })
+    resourceBadges.push(`${formatMicrocores(cfg.cpuRequest)} CPU`)
   if (cfg?.memoryRequest != null)
-    resourceCells.push({
-      label: 'Memory request',
-      value: `${cfg.memoryRequest} MB`,
-    })
-  if (cfg?.memoryLimit != null)
-    resourceCells.push({
-      label: 'Memory limit',
-      value: `${cfg.memoryLimit} MB`,
-    })
+    resourceBadges.push(`${cfg.memoryRequest} MB memory`)
   if (cfg?.replicas != null)
-    resourceCells.push({ label: 'Replicas', value: `${cfg.replicas}` })
-  if (cfg?.exposedPort != null)
-    resourceCells.push({
-      label: 'Exposed port',
-      value: `${cfg.exposedPort}`,
-      mono: true,
-    })
-
-  const featureToggles: { label: string; on: boolean }[] = []
-  if (cfg) {
-    const toggleDefs: { label: string; on?: boolean }[] = [
-      { label: 'Auto deploy', on: cfg.automaticDeploy },
-      { label: 'Session recording', on: cfg.sessionRecordingEnabled },
-      { label: 'Performance metrics', on: cfg.performanceMetricsEnabled },
-      { label: 'Container exec', on: cfg.containerExecEnabled },
-    ]
-    toggleDefs.forEach((t) => {
-      if (typeof t.on === 'boolean')
-        featureToggles.push({ label: t.label, on: t.on })
-    })
-  }
-
-  const envVarCount = cfg?.environmentVariables
-    ? Object.keys(cfg.environmentVariables).length
-    : 0
-
-  const hasResourceConfig =
-    resourceCells.length > 0 || featureToggles.length > 0 || envVarCount > 0
+    resourceBadges.push(`${cfg.replicas} replica${cfg.replicas === 1 ? '' : 's'}`)
 
   const overviewProps: OverviewProps = {
     project,
@@ -1073,41 +1337,58 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="space-y-6 p-4 sm:p-6">
-        {/* Shared: back navigation + rollback lineage banner */}
-        <div className="space-y-4">
-          <Button variant="ghost" size="sm" asChild className="-ml-2 gap-2">
-            <Link to={`/projects/${project.slug}/deployments`}>
-              <ArrowLeft className="h-4 w-4" />
-              Back to Deployments
-            </Link>
-          </Button>
+      <div className="space-y-3 p-4 sm:p-6">
+        {/* Unified header: back + status/env badges + commit + branch + timing,
+            with actions on the right. */}
+        <DeploymentHeader
+          project={project}
+          deployment={deployment}
+          isLive={isLive}
+          primaryUrl={primaryUrl}
+          wasDeployed={
+            deployment.status === 'completed' || deployment.status === 'paused'
+          }
+          commitUrls={overviewProps.commitUrls}
+          buildStats={buildStats}
+          actions={overviewProps.actions}
+        />
 
-          {md?.isRollback && (
-            <div className="flex items-center gap-2 rounded-md border border-gray-950/5 bg-muted/40 px-3 py-2 text-sm">
-              <RotateCcw className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="text-muted-foreground">
-                This is a rollback deployment
-                {md.rolledBackFromId ? (
-                  <>
-                    {' '}
-                    restoring{' '}
-                    <Link
-                      to={`/projects/${project.slug}/deployments/${md.rolledBackFromId}`}
-                      className="font-medium text-foreground hover:underline"
-                    >
-                      deployment #{md.rolledBackFromId}
-                    </Link>
-                  </>
-                ) : null}
-                .
-              </span>
-            </div>
-          )}
-        </div>
+        {/* Failure/cancellation reason — prominent, directly under the header. */}
+        <CancelledReason deployment={deployment} />
 
-        {/* Deployment overview — screenshot-led hero with the live preview,
-            environment URL, and commit info up top. */}
+        {resourceBadges.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {resourceBadges.map((badge) => (
+              <Badge key={badge} variant="secondary">
+                {badge}
+              </Badge>
+            ))}
+          </div>
+        )}
+
+        {md?.isRollback && (
+          <div className="flex items-center gap-2 rounded-md border border-gray-950/5 bg-muted/40 px-3 py-2 text-sm">
+            <RotateCcw className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="text-muted-foreground">
+              This is a rollback deployment
+              {md.rolledBackFromId ? (
+                <>
+                  {' '}
+                  restoring{' '}
+                  <Link
+                    to={`/projects/${project.slug}/deployments/${md.rolledBackFromId}`}
+                    className="font-medium text-foreground hover:underline"
+                  >
+                    deployment #{md.rolledBackFromId}
+                  </Link>
+                </>
+              ) : null}
+              .
+            </span>
+          </div>
+        )}
+
+        {/* Deployment overview — preview and (extra) URLs. */}
         <DeploymentOverview {...overviewProps} />
 
         {/* Build configuration */}
@@ -1173,47 +1454,6 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                 <p className="text-sm text-muted-foreground">
                   Image was loaded locally and not pulled from a registry.
                 </p>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Resource configuration */}
-        {hasResourceConfig && (
-          <Card>
-            <CardContent className="space-y-4 p-6">
-              <h2 className="text-base font-semibold">
-                Resource configuration
-              </h2>
-              {resourceCells.length > 0 && (
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-3">
-                  {resourceCells.map((cell) => (
-                    <Field
-                      key={cell.label}
-                      label={cell.label}
-                      value={cell.value}
-                      mono={cell.mono}
-                    />
-                  ))}
-                </dl>
-              )}
-              {(featureToggles.length > 0 || envVarCount > 0) && (
-                <div className="flex flex-wrap items-center gap-2">
-                  {featureToggles.map((toggle) => (
-                    <Badge
-                      key={toggle.label}
-                      variant={toggle.on ? 'success' : 'outline'}
-                    >
-                      {toggle.label}
-                    </Badge>
-                  ))}
-                  {envVarCount > 0 && (
-                    <Badge variant="secondary">
-                      {envVarCount} environment variable
-                      {envVarCount === 1 ? '' : 's'}
-                    </Badge>
-                  )}
-                </div>
               )}
             </CardContent>
           </Card>

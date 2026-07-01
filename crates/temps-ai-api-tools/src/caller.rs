@@ -519,7 +519,12 @@ impl InternalApiCaller {
                 .summary
                 .as_deref()
                 .or(op.description.as_deref())
-                .map(|s| s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim())
+                .map(|s| {
+                    s.lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim()
+                })
                 .filter(|s| !s.is_empty());
             if let Some(desc) = blurb {
                 out.push_str(" — ");
@@ -609,7 +614,12 @@ impl InternalApiCaller {
                             .summary
                             .as_deref()
                             .or(op.description.as_deref())
-                            .map(|s| s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim())
+                            .map(|s| {
+                                s.lines()
+                                    .find(|l| !l.trim().is_empty())
+                                    .unwrap_or("")
+                                    .trim()
+                            })
                             .filter(|s| !s.is_empty());
                         let summary = match human {
                             Some(desc) => {

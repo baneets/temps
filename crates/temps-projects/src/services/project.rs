@@ -59,7 +59,7 @@ pub struct EnvVarEnvironment {
     pub name: String,
 }
 
-// Constants for CPU allocation (in millicores, where 1000 = 1 CPU core).
+// Constants for CPU allocation (in microcores, where 1_000_000 = 1 CPU core).
 // Only *requests* (scheduling minimums) are defaulted; CPU/memory *limits* are
 // intentionally left unset so new projects/environments run uncapped by default.
 pub const DEFAULT_CPU_REQUEST: i32 = 500_000; // 0.5 cores
@@ -441,7 +441,15 @@ impl ProjectService {
 
     pub async fn get_projects(&self) -> Result<Vec<Project>, ProjectError> {
         let results = projects::Entity::find()
-            .order_by_desc(projects::Column::LastDeployment)
+            // Most-recently-deployed first; never-deployed projects (NULL
+            // last_deployment) sort last, not first — a NULL under DESC would
+            // otherwise be treated as "deployed infinitely recently".
+            .order_by_with_nulls(
+                projects::Column::LastDeployment,
+                sea_orm::Order::Desc,
+                sea_orm::sea_query::NullOrdering::Last,
+            )
+            .order_by_desc(projects::Column::CreatedAt)
             .all(self.db.as_ref())
             .await
             .map_err(|e| ProjectError::Other(e.to_string()))?;
@@ -1433,9 +1441,16 @@ impl ProjectService {
             .map_err(|e| ProjectError::DatabaseConnectionError(e.to_string()))?
             as i64;
 
-        // Get paginated projects
+        // Get paginated projects. Never-deployed projects (NULL last_deployment)
+        // sort last rather than first (a NULL under DESC would otherwise appear
+        // as the most-recently-deployed project).
         let projects = projects::Entity::find()
-            .order_by_desc(projects::Column::LastDeployment)
+            .order_by_with_nulls(
+                projects::Column::LastDeployment,
+                sea_orm::Order::Desc,
+                sea_orm::sea_query::NullOrdering::Last,
+            )
+            .order_by_desc(projects::Column::CreatedAt)
             .offset(offset)
             .limit(per_page as u64)
             .all(self.db.as_ref())
@@ -1856,6 +1871,9 @@ impl ProjectService {
             // not a git webhook — bypass automatic_deploy.
             manual_trigger: true,
             rollback_from_deployment_id: None,
+            // Infer the target from the branch at creation time (the default
+            // environment tracks main_branch).
+            target_environment_id: None,
         };
 
         self.queue_service
@@ -2028,6 +2046,11 @@ impl ProjectService {
             // "Deploy" button and the CLI — both are user-initiated.
             manual_trigger: true,
             rollback_from_deployment_id: None,
+            // The caller explicitly chose this environment — deploy there
+            // directly rather than re-inferring the target from the branch
+            // (which would fall through to a preview/named-preview env when the
+            // environment doesn't have the branch configured).
+            target_environment_id: Some(environment_id),
         };
 
         // Send the job to the queue

@@ -1302,11 +1302,7 @@ impl GitProviderService for GitHubProvider {
             .collect();
 
         // Sort: directories first, then alphabetically by name within each group.
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
 
         Ok(entries)
     }
@@ -2647,9 +2643,7 @@ mod list_directory_tests {
     /// Simulate the mapping + sort logic that `list_directory` applies to the
     /// raw GitHub Contents API items. This exercises the production code path
     /// without making any HTTP calls.
-    fn map_and_sort(
-        items: Vec<(&str, &str, &str, Option<u64>)>,
-    ) -> Vec<RepoDirEntry> {
+    fn map_and_sort(items: Vec<(&str, &str, &str, Option<u64>)>) -> Vec<RepoDirEntry> {
         // (name, path, type, size)
         let mut entries: Vec<RepoDirEntry> = items
             .into_iter()
@@ -2665,11 +2659,7 @@ mod list_directory_tests {
             })
             .collect();
 
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         entries
     }
 

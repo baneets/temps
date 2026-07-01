@@ -4,6 +4,7 @@ import {
   archiveConversation,
   getProjects,
   listAllConversations,
+  renameConversation,
   updateProjectSettings,
 } from '@/api/client'
 import {
@@ -18,6 +19,14 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { TimeAgo } from '@/components/utils/TimeAgo'
@@ -31,6 +40,7 @@ import {
   GitBranch,
   Loader2,
   MessageSquare,
+  Pencil,
   Plus,
   RotateCcw,
   Search,
@@ -251,6 +261,12 @@ function DockBody({
     publicId: string
     title: string
   } | null>(null)
+  const [pendingRename, setPendingRename] = useState<{
+    projectId: number
+    publicId: string
+  } | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renaming, setRenaming] = useState(false)
   // When true, the body shows the project picker for starting a fresh
   // project-scoped chat (a new thread, not tied to a deployment/alert).
   const [picking, setPicking] = useState(false)
@@ -352,6 +368,36 @@ function DockBody({
       backToList()
     } else {
       setConversations((prev) => prev.filter((c) => c.public_id !== d.publicId))
+    }
+  }
+
+  const startRename = (c: GlobalConversationResponse) => {
+    setRenameValue(c.title ?? '')
+    setPendingRename({ projectId: c.project_id, publicId: c.public_id })
+  }
+
+  const confirmRename = async () => {
+    const r = pendingRename
+    const title = renameValue.trim()
+    if (!r || !title) return
+    setRenaming(true)
+    try {
+      const { data } = await renameConversation({
+        path: { project_id: r.projectId, public_id: r.publicId },
+        body: { title },
+      })
+      const newTitle = data?.title ?? title
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.public_id === r.publicId ? { ...c, title: newTitle } : c,
+        ),
+      )
+      toast.success('Chat renamed')
+      setPendingRename(null)
+    } catch {
+      toast.error('Could not rename chat')
+    } finally {
+      setRenaming(false)
     }
   }
 
@@ -534,6 +580,7 @@ function DockBody({
               })
               if (h) goToSource(h)
             }}
+            onRename={startRename}
             onDelete={(c) =>
               setPendingDelete({
                 projectId: c.project_id,
@@ -569,6 +616,47 @@ function DockBody({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog
+        open={pendingRename !== null}
+        onOpenChange={(o) => !o && setPendingRename(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename chat</DialogTitle>
+            <DialogDescription>
+              Give this conversation a name so it&apos;s easy to find later.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              void confirmRename()
+            }}
+          >
+            <Input
+              autoFocus
+              value={renameValue}
+              maxLength={200}
+              placeholder="e.g. Prod memory tuning"
+              onChange={(e) => setRenameValue(e.target.value)}
+            />
+            <DialogFooter className="mt-4">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setPendingRename(null)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!renameValue.trim() || renaming}>
+                {renaming && <Loader2 className="h-4 w-4 animate-spin" />}
+                Save
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -578,12 +666,14 @@ function ConversationList({
   conversations,
   onOpen,
   onOpenSource,
+  onRename,
   onDelete,
 }: {
   loading: boolean
   conversations: GlobalConversationResponse[]
   onOpen: (c: GlobalConversationResponse) => void
   onOpenSource: (c: GlobalConversationResponse) => void
+  onRename: (c: GlobalConversationResponse) => void
   onDelete: (c: GlobalConversationResponse) => void
 }) {
   if (loading) {
@@ -659,6 +749,15 @@ function ConversationList({
                 <ExternalLink className="h-3.5 w-3.5" />
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => onRename(c)}
+              className="shrink-0 rounded-md p-1.5 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100"
+              title="Rename chat"
+              aria-label="Rename chat"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
             <button
               type="button"
               onClick={() => onDelete(c)}

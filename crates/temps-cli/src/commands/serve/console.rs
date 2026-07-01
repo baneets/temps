@@ -1942,6 +1942,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         "get_deployment",
                         "get_last_deployment",
                         "get_project_deployments",
+                        // Manual-deploy discovery: registered external images the
+                        // AI can deploy by id/ref (metadata only — no registry
+                        // credentials). Static bundles are frontend-only, so their
+                        // read ops are intentionally excluded here.
+                        "list_external_images",
+                        "get_external_image",
                         "get_deployment_jobs",
                         "get_deployment_operations",
                         "get_deployment_operation_status",
@@ -2049,8 +2055,8 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                     // is conservative by design: high-value, mostly-reversible
                     // lifecycle + config operations. Adding an entry is a product +
                     // security decision (what may the AI propose for a human to run).
-                    if let Some(write_handle) = service_context
-                        .get_service::<temps_ai_api_tools::WriteApiToolsHandle>()
+                    if let Some(write_handle) =
+                        service_context.get_service::<temps_ai_api_tools::WriteApiToolsHandle>()
                     {
                         let write_allowlist: Vec<String> = [
                             // ── Deployment lifecycle (reversible / safe) ──
@@ -2063,6 +2069,15 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                             "pause_deployment",
                             "resume_deployment",
                             "cancel_deployment",
+                            // ── Manual image deploy (no git build) ──
+                            // Deploy a prebuilt Docker image by `image_ref` (a
+                            // pullable registry ref) or a registered
+                            // `external_image_id`, to a specific environment_id.
+                            // Static-bundle deploys are intentionally NOT here: the
+                            // AI can't perform the multipart file upload, so the
+                            // whole static flow (upload + deploy) lives in the
+                            // frontend.
+                            "deploy_from_image",
                             // ── Container runtime control (reversible) ──
                             "restart_container",
                             "stop_container",
@@ -2070,6 +2085,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                             // ── Environment wake/sleep (reversible) ──
                             "wake_environment",
                             "sleep_environment",
+                            // ── Environment settings (resource limits, replicas,
+                            //    branch) — what "raise memory to 512 MB" /
+                            //    "give it more CPU" / "scale to 2 replicas" map to.
+                            //    Values are microcores (1_000_000 = 1 core) and MB.
+                            //    Reversible: it's a config change, re-applicable.
+                            "update_environment_settings",
                             // ── Environment variables (set / change) ──
                             "create_environment_variable",
                             "update_environment_variable",

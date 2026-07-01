@@ -93,8 +93,11 @@ pub(crate) fn resolve<'a>(
         {
             Some(op) => resolve_operation(op, &tokens[2..]),
             None => CliAction::Terminal(format!(
-                "Unknown operation '{op_name}' in section '{}'. Run `{} --help` to list it.",
-                sec.slug, sec.slug
+                "Unknown operation '{op_name}' in section '{}'. Run `{} --help` to list it.{}{}",
+                sec.slug,
+                sec.slug,
+                mutation_redirect(op_name),
+                suggest_operations(&secs, op_name),
             )),
         };
     }
@@ -105,8 +108,100 @@ pub(crate) fn resolve<'a>(
     }
 
     CliAction::Terminal(format!(
-        "Unknown command '{first}'. Run `--help` to list sections."
+        "Unknown command '{first}'. Run `--help` to list sections.{}{}",
+        mutation_redirect(first),
+        suggest_operations(&secs, first),
     ))
+}
+
+/// Fuzzy discovery aid: when the model names an unknown section or operation
+/// (e.g. `environments`, because the env ops are tagged "Projects" and live under
+/// the `projects` section), list the real operations whose id or path contains
+/// that token so the model can find them without guessing the section. Returns a
+/// trailing block (leading blank line) or "" when nothing matches.
+fn suggest_operations(secs: &[Section], token: &str) -> String {
+    let lower = token.to_ascii_lowercase();
+    // Also match the singular ("environments" → "environment").
+    let singular = lower.strip_suffix('s').unwrap_or(&lower);
+    let needles: [&str; 2] = [lower.as_str(), singular];
+
+    let mut hits: Vec<String> = Vec::new();
+    for sec in secs {
+        for op in &sec.operations {
+            let id = op.operation_id.to_ascii_lowercase();
+            let path = op.path.to_ascii_lowercase();
+            if needles.iter().any(|n| id.contains(n) || path.contains(n)) {
+                hits.push(format!("  {} {}", sec.slug, op.operation_id));
+                if hits.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        if hits.len() >= 8 {
+            break;
+        }
+    }
+
+    if hits.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nNo '{token}' section — but these operations match (run `<section> \
+         <operation> --help`):\n{}",
+        hits.join("\n")
+    )
+}
+
+/// The read-only `temps` tool exposes only GET endpoints, so any request to
+/// *change* state dead-ends here. When the operation the model reached for
+/// looks like a mutation, steer it to the confirm-gated `temps_write` tool
+/// instead of leaving it to loop on read-only `--help` probes. Returns a
+/// trailing sentence (leading space) to append to the error, or "" otherwise.
+fn mutation_redirect(op_name: &str) -> String {
+    let lower = op_name.to_ascii_lowercase();
+    // operationIds are `verb_noun`, so match only the LEADING verb — this
+    // distinguishes the mutation `deploy`/`promote_deployment` from the read
+    // noun in `get_deployment`/`list_deployments`. Read verbs (get/list/query/…)
+    // are simply absent from this set.
+    const MUTATION_VERBS: &[&str] = &[
+        "create",
+        "update",
+        "delete",
+        "remove",
+        "add",
+        "set",
+        "promote",
+        "rollback",
+        "restart",
+        "stop",
+        "start",
+        "pause",
+        "resume",
+        "cancel",
+        "trigger",
+        "deploy",
+        "redeploy",
+        "wake",
+        "sleep",
+        "scale",
+        "rename",
+        "enable",
+        "disable",
+        "rotate",
+        "reset",
+        "install",
+        "uninstall",
+    ];
+    let leading_verb = lower.split('_').next().unwrap_or(&lower);
+    let looks_mutating = MUTATION_VERBS.contains(&leading_verb);
+    if looks_mutating {
+        " This looks like a mutation — the read-only `temps` tool cannot change \
+         state. Propose it with the `temps_write` tool instead (e.g. \
+         `temps_write` with command `<operation> --help`), then let the user confirm."
+            .to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Resolve the tail of `… <operation_id> [tail]` — either help or execution.
@@ -423,6 +518,38 @@ mod tests {
     #[test]
     fn parse_flags_rejects_bare_positional() {
         assert!(parse_flags(&["oops".into()]).is_err());
+    }
+
+    #[test]
+    fn mutation_redirect_steers_write_ops_to_temps_write() {
+        // Mutation-shaped names get the redirect...
+        for op in [
+            "promote_deployment",
+            "rollback_to_deployment",
+            "trigger_project_pipeline",
+            "update_environment_settings",
+            "restart_container",
+            "create_environment_variable",
+            "delete",
+        ] {
+            let hint = mutation_redirect(op);
+            assert!(
+                hint.contains("temps_write"),
+                "expected `{op}` to redirect to temps_write, got: {hint:?}"
+            );
+        }
+        // ...read/query verbs do not.
+        for op in [
+            "get_deployment",
+            "list_containers",
+            "query_metrics",
+            "get_environments",
+        ] {
+            assert!(
+                mutation_redirect(op).is_empty(),
+                "expected `{op}` to produce no redirect"
+            );
+        }
     }
 
     #[test]

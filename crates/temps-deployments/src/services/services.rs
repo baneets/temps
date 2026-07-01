@@ -98,6 +98,13 @@ pub struct DeploymentService {
     /// Anonymous product telemetry reporter (late-bound, optional). Set via
     /// [`Self::set_telemetry`]; defaults to a no-op when unset.
     telemetry: std::sync::OnceLock<Arc<dyn temps_core::telemetry::TelemetryReporter>>,
+    /// Resolves a container's environment variables from the selected
+    /// environment (late-bound; the resolver's six service deps only exist later
+    /// in plugin init). Set via [`Self::set_env_resolver`]. Used by the inline
+    /// promote/rollback deploy paths so a promoted/rolled-back container gets the
+    /// SAME resolved env (user vars, external-service vars, Sentry/OTel, API
+    /// token) as a normal deploy — see [`crate::services::env_resolver`].
+    env_resolver: std::sync::OnceLock<Arc<crate::services::env_resolver::DeploymentEnvResolver>>,
 }
 
 impl DeploymentService {
@@ -147,7 +154,17 @@ impl DeploymentService {
             deployer,
             encryption_service,
             telemetry: std::sync::OnceLock::new(),
+            env_resolver: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Late-bind the environment-variable resolver (see the field docs). Called
+    /// once during plugin init after the resolver's service deps exist.
+    pub fn set_env_resolver(
+        &self,
+        resolver: Arc<crate::services::env_resolver::DeploymentEnvResolver>,
+    ) {
+        let _ = self.env_resolver.set(resolver);
     }
 
     /// Set the anonymous telemetry reporter used to emit deploy-funnel events
@@ -1065,6 +1082,10 @@ impl DeploymentService {
             // User-initiated trigger — bypasses environments.automatic_deploy.
             manual_trigger: true,
             rollback_from_deployment_id,
+            // This trigger names a concrete environment (redeploy, rollback,
+            // node-drain reschedule) — deploy to it directly instead of
+            // re-inferring the target from the branch.
+            target_environment_id: Some(environment_id),
         };
 
         tracing::debug!(
@@ -1564,6 +1585,29 @@ impl DeploymentService {
                 environment.deployment_config.as_ref(),
                 project.deployment_config.as_ref(),
             ));
+
+            // Resolve the environment's env vars exactly as a normal deploy does,
+            // so the rolled-back container boots with the full set (user vars,
+            // external-service connection strings, SENTRY_DSN, TEMPS_API_TOKEN,
+            // CRON_SECRET, OTEL_*) instead of nothing. Without this, a rollback
+            // reuses the image but starts it unconfigured.
+            let resolved_env = if let Some(resolver) = self.env_resolver.get() {
+                resolver
+                    .resolve(&project, &environment, &rollback_deployment)
+                    .await
+                    .map_err(|e| {
+                        DeploymentError::Other(format!(
+                            "Failed to resolve environment variables for rollback in environment {}: {}",
+                            environment_id, e
+                        ))
+                    })?
+            } else {
+                tracing::warn!(
+                    "Rollback: env resolver not wired — rolled-back container starts with no resolved env vars"
+                );
+                std::collections::HashMap::new()
+            };
+            deploy_builder = deploy_builder.environment_variables(resolved_env);
 
             let deploy_job = deploy_builder
                 .build(self.deployer.clone())
@@ -2110,6 +2154,29 @@ impl DeploymentService {
                 target_env.deployment_config.as_ref(),
                 project.deployment_config.as_ref(),
             ));
+
+            // Resolve the TARGET environment's env vars exactly as a normal
+            // deploy does, so the promoted container boots with the full set
+            // (user vars, external-service connection strings, SENTRY_DSN,
+            // TEMPS_API_TOKEN/URL, CRON_SECRET, OTEL_*) instead of nothing.
+            // Without this, promotion reuses the image but starts it unconfigured.
+            let resolved_env = if let Some(resolver) = self.env_resolver.get() {
+                resolver
+                    .resolve(&project, &target_env, &promoted_deployment)
+                    .await
+                    .map_err(|e| {
+                        DeploymentError::Other(format!(
+                            "Failed to resolve environment variables for promotion to environment {}: {}",
+                            target_environment_id, e
+                        ))
+                    })?
+            } else {
+                tracing::warn!(
+                    "Promotion: env resolver not wired — promoted container starts with no resolved env vars"
+                );
+                std::collections::HashMap::new()
+            };
+            deploy_builder = deploy_builder.environment_variables(resolved_env);
 
             let deploy_job = deploy_builder
                 .build(self.deployer.clone())
@@ -3986,6 +4053,7 @@ mod tests {
             deployer,
             encryption_service: create_test_encryption_service(),
             telemetry: std::sync::OnceLock::new(),
+            env_resolver: std::sync::OnceLock::new(),
         }
     }
 
@@ -4332,6 +4400,7 @@ mod tests {
             deployer,
             encryption_service: create_test_encryption_service(),
             telemetry: std::sync::OnceLock::new(),
+            env_resolver: std::sync::OnceLock::new(),
         }
     }
 

@@ -682,22 +682,39 @@ impl ConversationService {
                 returned by an earlier read such as `get_last_deployment`) and pass the real \
                 value — do NOT omit a field the operation needs just because the schema marks \
                 it optional, and never invent an id. \
+                For a SEQUENCE of changes where order matters — e.g. raise an environment's \
+                resources and THEN redeploy it so the new deploy picks them up — pass `commands` \
+                (an ordered array), not repeated single calls: the user reviews the whole plan \
+                and confirms each step in order, a step runs only after the previous one \
+                succeeds, and a failed or rejected step halts the rest. Put prerequisites first, \
+                and make sure every step's ids/flags are known up front (look them up first) — a \
+                step cannot use a value produced by an earlier step. \
                 Never claim the action has succeeded — tell the user to review and \
                 confirm or reject the proposal."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "required": ["command"],
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "A write Temps CLI command line. \
+                        "description": "A single write Temps CLI command line (one action). \
                                         Discovery: `--help` → sections; `<section> --help` → operations; \
                                         `<section> <operation> --help` → flags. \
                                         Run: `<section> <operation> --flag value …`. \
                                         project_id is auto-filled. \
-                                        This PROPOSES a change — it does NOT execute immediately. \
-                                        The user must confirm in the UI."
+                                        This PROPOSES a change — it does NOT execute immediately."
+                    },
+                    "commands": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "An ORDERED list of write CLI command lines to propose as a \
+                                        single multi-step plan (use instead of `command` when the \
+                                        user asked for a sequence where order matters, e.g. \
+                                        [\"update_environment_settings --env_id 8 --memory_limit 512\", \
+                                        \"trigger_project_pipeline --environment_id 8\"]). Steps are \
+                                        confirmed one at a time in this order; a step runs only after \
+                                        the previous one succeeds. Provide exactly one of `command` or \
+                                        `commands`."
                     }
                 },
                 "additionalProperties": false
@@ -777,10 +794,7 @@ impl ConversationService {
             .write_support
             .as_ref()
             .and_then(|ws| ws.write_handle.get());
-        let pending_svc_opt = self
-            .write_support
-            .as_ref()
-            .map(|ws| ws.pending.clone());
+        let pending_svc_opt = self.write_support.as_ref().map(|ws| ws.pending.clone());
 
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<ChatStreamEvent, ChatError>>();
@@ -974,13 +988,8 @@ impl ConversationService {
                             // provider rather than the context provider, so the
                             // model can explore the source tree in any context.
                             if let Some(rt) = &repo_tools {
-                                rt.execute_tool(
-                                    project_id,
-                                    &context_id,
-                                    &tc.name,
-                                    &tc.arguments,
-                                )
-                                .await
+                                rt.execute_tool(project_id, &context_id, &tc.name, &tc.arguments)
+                                    .await
                             } else {
                                 format!(
                                     "Tool '{}' is not available (repo tools provider absent).",
@@ -1102,7 +1111,8 @@ impl ConversationService {
                     // to the persisted assistant message so the UI can correlate them.
                     if !proposed_action_ids.is_empty() {
                         if let Some(pending) = &pending_svc_opt {
-                            if let Err(e) = pending.link_message(&proposed_action_ids, msg.id).await {
+                            if let Err(e) = pending.link_message(&proposed_action_ids, msg.id).await
+                            {
                                 tracing::warn!(
                                     conv_id,
                                     "Failed to link pending actions to message {}: {e}",
@@ -1132,6 +1142,22 @@ impl ConversationService {
         };
         am.update(self.db.as_ref()).await?;
         Ok(())
+    }
+
+    /// Rename a conversation (set its human-facing title). Returns the updated
+    /// model so the handler can echo the new title back to the client.
+    pub async fn rename(
+        &self,
+        conv: &ai_conversations::Model,
+        title: &str,
+    ) -> Result<ai_conversations::Model, ChatError> {
+        let am = ai_conversations::ActiveModel {
+            id: Set(conv.id),
+            title: Set(Some(title.to_string())),
+            ..Default::default()
+        };
+        let updated = am.update(self.db.as_ref()).await?;
+        Ok(updated)
     }
 }
 
@@ -1174,57 +1200,127 @@ async fn dispatch_write_tool(
         Ok(v) => v,
         Err(e) => return format!("Invalid `temps_write` arguments (not JSON): {e}"),
     };
-    let command = match args.get("command").and_then(|v| v.as_str()) {
-        Some(c) => c,
-        None => {
-            return "The `temps_write` tool requires a 'command' string. \
-                    Try `--help` to list write sections."
-                .to_string()
-        }
-    };
-
     let scope = ApiCallScope {
         auth: auth.clone(),
         project_ids: vec![project_id],
     };
 
-    match caller.prepare_write_cli(command, &scope) {
-        WritePrepareOutcome::Help(text) => text,
-        WritePrepareOutcome::Invalid(msg) => msg,
-        WritePrepareOutcome::Prepared(prepared) => {
-            // Pass the advisory required_permission computed at prepare time
-            // (from the operation's OpenAPI tag + HTTP method). The router's
-            // permission_guard! is the real enforcement boundary at execute time;
-            // this stored value is used for a pre-claim advisory check in confirm.
-            match pending
-                .create(
-                    conversation_id,
-                    project_id,
-                    &prepared,
-                    prepared.required_permission.clone(),
-                    Some(auth.user_id()),
-                )
-                .await
-            {
-                Ok(row) => {
-                    // Track the row ID so the caller can link it to the message
-                    // once the assistant turn is persisted.
-                    proposed_action_ids.push(row.id);
-                    serde_json::json!({
-                        "status": "proposed",
-                        "action_id": row.public_id,
-                        "operation": row.operation_id,
-                        "method": row.method,
-                        "summary": row.summary,
-                        "note": "PROPOSAL ONLY — awaiting explicit user confirmation in the UI. \
-                                 It has NOT run. Do not claim success; tell the user to review \
-                                 and confirm or reject it."
-                    })
-                    .to_string()
-                }
-                Err(e) => format!("Could not stage this change: {e}"),
+    // Two shapes: a single `command` (standalone action) or an ordered
+    // `commands` array (a multi-step *plan*, confirmed one step at a time in
+    // order). Use a plan when order matters — e.g. change resources THEN redeploy.
+    let is_plan = args.get("commands").is_some();
+    let commands: Vec<String> = if let Some(arr) = args.get("commands").and_then(|v| v.as_array()) {
+        let cmds: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if cmds.is_empty() {
+            return "The `temps_write` 'commands' array is empty — provide one command \
+                    string per step, in execution order."
+                .to_string();
+        }
+        cmds
+    } else if let Some(c) = args.get("command").and_then(|v| v.as_str()) {
+        vec![c.to_string()]
+    } else {
+        return "The `temps_write` tool requires either a 'command' string (one action) \
+                or a 'commands' array (an ordered multi-step plan). Use `--help` to \
+                discover operations."
+            .to_string();
+    };
+
+    // Prepare (validate, NO execution) every step first. If any step is a help
+    // request or fails to validate, surface that and stage NOTHING — a plan is
+    // only proposed once every step is valid.
+    let mut prepared_steps: Vec<(temps_ai_api_tools::PreparedWrite, Option<String>)> = Vec::new();
+    for (i, cmd) in commands.iter().enumerate() {
+        match caller.prepare_write_cli(cmd, &scope) {
+            WritePrepareOutcome::Help(text) => return text,
+            WritePrepareOutcome::Invalid(msg) => {
+                return if is_plan {
+                    format!("Plan not staged — step {} is invalid: {msg}", i + 1)
+                } else {
+                    msg
+                };
+            }
+            WritePrepareOutcome::Prepared(prepared) => {
+                let perm = prepared.required_permission.clone();
+                prepared_steps.push((prepared, perm));
             }
         }
+    }
+
+    // Standalone single action (back-compat): one `create` row, no plan grouping.
+    if !is_plan {
+        let (prepared, perm) = &prepared_steps[0];
+        return match pending
+            .create(
+                conversation_id,
+                project_id,
+                prepared,
+                perm.clone(),
+                Some(auth.user_id()),
+            )
+            .await
+        {
+            Ok(row) => {
+                proposed_action_ids.push(row.id);
+                serde_json::json!({
+                    "status": "proposed",
+                    "action_id": row.public_id,
+                    "operation": row.operation_id,
+                    "method": row.method,
+                    "summary": row.summary,
+                    "note": "PROPOSAL ONLY — awaiting explicit user confirmation in the UI. \
+                             It has NOT run. Do not claim success; tell the user to review \
+                             and confirm or reject it."
+                })
+                .to_string()
+            }
+            Err(e) => format!("Could not stage this change: {e}"),
+        };
+    }
+
+    // Multi-step plan: one grouped set of rows, confirmed one step at a time.
+    match pending
+        .create_plan(
+            conversation_id,
+            project_id,
+            &prepared_steps,
+            Some(auth.user_id()),
+        )
+        .await
+    {
+        Ok(rows) => {
+            for r in &rows {
+                proposed_action_ids.push(r.id);
+            }
+            let steps: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "step": r.step_index + 1,
+                        "action_id": r.public_id,
+                        "operation": r.operation_id,
+                        "method": r.method,
+                        "summary": r.summary,
+                    })
+                })
+                .collect();
+            let plan_id = rows.first().and_then(|r| r.plan_public_id.clone());
+            serde_json::json!({
+                "status": "proposed_plan",
+                "plan_id": plan_id,
+                "step_count": rows.len(),
+                "steps": steps,
+                "note": "PROPOSAL ONLY — a multi-step plan awaiting the user's confirmation. \
+                         NOTHING has run. The user confirms each step in order in the UI; a \
+                         step runs only after the previous one succeeds, and a failed or \
+                         rejected step halts the rest. Do not claim any step succeeded."
+            })
+            .to_string()
+        }
+        Err(e) => format!("Could not stage this plan: {e}"),
     }
 }
 

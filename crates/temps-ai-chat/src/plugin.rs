@@ -84,10 +84,8 @@ impl TempsPlugin for AiChatPlugin {
 
             // Pending-action service (propose-then-confirm write actions).
             // Audit is emitted by the handler layer (with full RequestMetadata).
-            let pending_actions = Arc::new(PendingActionService::new(
-                db.clone(),
-                write_handle.clone(),
-            ));
+            let pending_actions =
+                Arc::new(PendingActionService::new(db.clone(), write_handle.clone()));
             context.register_service(pending_actions.clone());
 
             // Built-in providers (one per context_type). Future context types add

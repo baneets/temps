@@ -30,6 +30,13 @@ pub struct Model {
     pub message_id: Option<i64>,
     /// The project this action targets.
     pub project_id: i32,
+    /// Groups the steps of a multi-step *plan* (chained actions). `None` for a
+    /// standalone single-action proposal. All steps of one plan share this id and
+    /// are confirmed one at a time in [`step_index`] order.
+    pub plan_public_id: Option<String>,
+    /// 0-based order of this step within its plan (`0` for standalone actions).
+    /// A step is confirmable only once every earlier step has `executed`.
+    pub step_index: i32,
     /// Machine-readable operation identifier, e.g. `"redeploy_deployment"`.
     pub operation_id: String,
     /// HTTP method the operation will use: `"POST"`, `"PUT"`, `"PATCH"`, or `"DELETE"`.

@@ -138,19 +138,14 @@ impl RepoToolsProvider {
             .await
         {
             Ok(file) => bound(&decode_file_content(&file.content, &file.encoding), path),
-            Err(e) => format!(
-                "Could not read '{path}' from {owner}/{repo} at ref '{reference}': {e}"
-            ),
+            Err(e) => {
+                format!("Could not read '{path}' from {owner}/{repo} at ref '{reference}': {e}")
+            }
         }
     }
 
     /// Execute `list_repo_dir`: list directory entries at the given path.
-    async fn exec_list_dir(
-        &self,
-        project_id: i32,
-        path: &str,
-        ref_: Option<&str>,
-    ) -> String {
+    async fn exec_list_dir(&self, project_id: i32, path: &str, ref_: Option<&str>) -> String {
         // Empty path = repo root.
         let path = path.trim().trim_start_matches('/');
 
@@ -201,9 +196,8 @@ impl RepoToolsProvider {
         };
 
         let display_path = if path.is_empty() { "/" } else { path };
-        let mut out = format!(
-            "Directory '{display_path}' in {owner}/{repo} at ref '{reference}':\n"
-        );
+        let mut out =
+            format!("Directory '{display_path}' in {owner}/{repo} at ref '{reference}':\n");
         for entry in shown {
             if entry.is_dir {
                 out.push_str(&format!("  d  {}/\n", entry.path));
@@ -462,10 +456,7 @@ impl ConversationContextProvider for RepoToolsProvider {
                         a non-empty repository-relative string, e.g. 'package.json'."
                         .to_string();
                 }
-                let ref_ = args
-                    .get("ref")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
+                let ref_ = args.get("ref").and_then(|v| v.as_str()).map(str::to_string);
                 self.exec_read_file(project_id, &path, ref_.as_deref())
                     .await
             }
@@ -476,12 +467,8 @@ impl ConversationContextProvider for RepoToolsProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let ref_ = args
-                    .get("ref")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                self.exec_list_dir(project_id, &path, ref_.as_deref())
-                    .await
+                let ref_ = args.get("ref").and_then(|v| v.as_str()).map(str::to_string);
+                self.exec_list_dir(project_id, &path, ref_.as_deref()).await
             }
 
             "list_repo_branches" => self.exec_list_branches(project_id).await,
@@ -578,9 +565,8 @@ mod tests {
         let repo = "repo";
         let reference = "main";
         let display_path = "/";
-        let mut out = format!(
-            "Directory '{display_path}' in {owner}/{repo} at ref '{reference}':\n"
-        );
+        let mut out =
+            format!("Directory '{display_path}' in {owner}/{repo} at ref '{reference}':\n");
         for entry in &entries {
             if entry.is_dir {
                 out.push_str(&format!("  d  {}/\n", entry.path));
@@ -618,7 +604,11 @@ mod tests {
         let shown = &entries[..MAX_DIR_ENTRIES];
         let mut out = String::new();
         for entry in shown {
-            out.push_str(&format!("  f  {} ({} B)\n", entry.path, entry.size.unwrap()));
+            out.push_str(&format!(
+                "  f  {} ({} B)\n",
+                entry.path,
+                entry.size.unwrap()
+            ));
         }
         out.push_str(&format!(
             "\n[truncated — showing {MAX_DIR_ENTRIES} of {} entries]\n",
@@ -634,9 +624,7 @@ mod tests {
     async fn execute_tool_unknown_name() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let provider = RepoToolsProvider::new(Arc::new(db), None);
-        let result = provider
-            .execute_tool(1, "", "nonexistent_tool", "{}")
-            .await;
+        let result = provider.execute_tool(1, "", "nonexistent_tool", "{}").await;
         assert!(
             result.contains("Unknown repo tool"),
             "expected unknown-tool message, got: {result}"
@@ -663,9 +651,7 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let provider = RepoToolsProvider::new(Arc::new(db), None);
         // Arguments have no "path" key at all.
-        let result = provider
-            .execute_tool(1, "", "read_repo_file", "{}")
-            .await;
+        let result = provider.execute_tool(1, "", "read_repo_file", "{}").await;
         // The missing-path guard fires before any git access.
         assert!(
             result.contains("path"),

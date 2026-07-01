@@ -1007,11 +1007,7 @@ impl GitProviderService for GitLabProvider {
         }
 
         // Sort: directories first, then alphabetically by name within each group.
-        all_entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        all_entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
 
         Ok(all_entries)
     }
@@ -2043,9 +2039,7 @@ mod list_directory_tests {
 
     /// Simulate the mapping + sort logic applied in `list_directory` without
     /// making any HTTP calls.
-    fn map_and_sort(
-        items: Vec<(&str, &str, &str)>,
-    ) -> Vec<RepoDirEntry> {
+    fn map_and_sort(items: Vec<(&str, &str, &str)>) -> Vec<RepoDirEntry> {
         // (name, path, type)
         let mut entries: Vec<RepoDirEntry> = items
             .into_iter()
@@ -2061,11 +2055,7 @@ mod list_directory_tests {
             })
             .collect();
 
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         entries
     }
 

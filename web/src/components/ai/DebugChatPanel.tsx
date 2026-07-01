@@ -252,6 +252,29 @@ function parseProposal(result?: string | null): Proposal | null {
   return null
 }
 
+/** Compose a chat message that hands a failed write action back to the AI with
+ *  everything it needs to diagnose and re-propose: the operation, the exact
+ *  params sent (already redacted server-side), and the error. */
+function buildFixMessage(
+  op: string,
+  method: string,
+  params: string | null,
+  error: string | null
+): string {
+  return [
+    'A write action I confirmed just FAILED. Diagnose the cause from the error ' +
+      'below and propose a corrected action (look up any wrong/missing ids with ' +
+      'the read tool first). Do not claim success.',
+    '',
+    `- Operation: \`${op}\``,
+    method ? `- Method: \`${method}\`` : '',
+    params && params !== '{}' ? `- Params sent: ${params}` : '',
+    error ? `- Error: ${error}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 const ACTION_STATUS: Record<string, { label: string; cls: string }> = {
   proposed: { label: 'Awaiting your confirmation', cls: 'text-amber-600 dark:text-amber-400' },
   executing: { label: 'Running…', cls: 'text-muted-foreground' },
@@ -270,9 +293,12 @@ const ACTION_STATUS: Record<string, { label: string; cls: string }> = {
 function PendingActionCard({
   projectId,
   tool,
+  onFix,
 }: {
   projectId: number
   tool: ToolCall
+  /** Send a follow-up chat message (used by "Fix with AI" on failure). */
+  onFix?: (text: string) => void
 }) {
   const proposal = parseProposal(tool.result)
   const actionId = proposal?.action_id
@@ -426,10 +452,349 @@ function PendingActionCard({
             ) : (
               <ToolBlock value={result ?? ''} />
             ))}
+          {status === 'failed' && onFix && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-1 h-7 gap-1 px-2 text-xs"
+              onClick={() =>
+                onFix(
+                  buildFixMessage(proposal.operation, proposal.method, params, error)
+                )
+              }
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Fix with AI
+            </Button>
+          )}
         </div>
       ) : null}
     </div>
   )
+}
+
+/** One step of a multi-step plan proposal. */
+interface PlanStep {
+  action_id: string
+  operation: string
+  method: string
+  summary: string
+  step: number
+}
+
+interface PlanProposal {
+  plan_id: string | null
+  steps: PlanStep[]
+}
+
+/** Parse a `temps_write` tool result into a plan proposal, or null when it's a
+ *  single action / help text (handled elsewhere). */
+function parsePlanProposal(result?: string | null): PlanProposal | null {
+  if (!result) return null
+  try {
+    const o = JSON.parse(result) as {
+      status?: string
+      plan_id?: string
+      steps?: Array<Partial<PlanStep>>
+    }
+    if (o?.status === 'proposed_plan' && Array.isArray(o.steps)) {
+      const steps = o.steps
+        .map((s, i) => ({
+          action_id: String(s.action_id ?? ''),
+          operation: String(s.operation ?? ''),
+          method: String(s.method ?? ''),
+          summary: String(s.summary ?? ''),
+          step: Number(s.step ?? i + 1),
+        }))
+        .filter((s) => s.action_id)
+      if (steps.length > 0) {
+        return { plan_id: o.plan_id ? String(o.plan_id) : null, steps }
+      }
+    }
+  } catch {
+    /* not a plan payload */
+  }
+  return null
+}
+
+interface StepState {
+  status: string
+  result?: string | null
+  error?: string | null
+  params?: string | null
+}
+
+/**
+ * A multi-step *plan* the AI proposed (chained actions, e.g. "raise resources
+ * then redeploy"). Every step is shown up front, but steps run ONE AT A TIME in
+ * order: only the next un-run step is actionable, confirming it replays that one
+ * mutation server-side (permission-checked + audited), and a failed or rejected
+ * step halts the rest. Each step is its own pending-action row; this card just
+ * groups and sequences them.
+ */
+function PlanActionCard({
+  projectId,
+  plan,
+  onFix,
+}: {
+  projectId: number
+  plan: PlanProposal
+  /** Send a follow-up chat message (used by "Fix with AI" on a failed step). */
+  onFix?: (text: string) => void
+}) {
+  const [states, setStates] = useState<Record<string, StepState>>(() =>
+    Object.fromEntries(
+      plan.steps.map((s) => [s.action_id, { status: 'proposed' } as StepState])
+    )
+  )
+  const [busy, setBusy] = useState<string | null>(null)
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const fetchAll = useCallback(() => {
+    let cancelled = false
+    void Promise.all(
+      plan.steps.map((s) =>
+        fetch(`/api/projects/${projectId}/ai/pending-actions/${s.action_id}`, {
+          credentials: 'include',
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => [s.action_id, d] as const)
+          .catch(() => [s.action_id, null] as const)
+      )
+    ).then((pairs) => {
+      if (cancelled) return
+      setStates((prev) => {
+        const next = { ...prev }
+        for (const [id, d] of pairs) {
+          if (d)
+            next[id] = {
+              status: typeof d.status === 'string' ? d.status : 'proposed',
+              result: d.result != null ? JSON.stringify(d.result) : null,
+              error: typeof d.error === 'string' ? d.error : null,
+              params: d.params != null ? JSON.stringify(d.params) : null,
+            }
+        }
+        return next
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, plan])
+
+  useEffect(() => fetchAll(), [fetchAll])
+
+  const statuses = plan.steps.map(
+    (s) => states[s.action_id]?.status ?? 'proposed'
+  )
+  // The next actionable step: the first still-'proposed' step whose every
+  // predecessor has 'executed'. If a predecessor failed/rejected/skipped, the
+  // plan is halted and nothing is actionable.
+  let actionableIdx = -1
+  for (let i = 0; i < plan.steps.length; i++) {
+    if (statuses[i] === 'proposed') {
+      if (statuses.slice(0, i).every((st) => st === 'executed')) actionableIdx = i
+      break
+    }
+  }
+
+  const act = async (actionId: string, kind: 'confirm' | 'reject') => {
+    setBusy(actionId)
+    try {
+      const r = await fetch(
+        `/api/projects/${projectId}/ai/pending-actions/${actionId}/${kind}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+      const d = await r.json().catch(() => null)
+      setStates((prev) => ({
+        ...prev,
+        [actionId]: {
+          status:
+            typeof d?.status === 'string'
+              ? d.status
+              : (prev[actionId]?.status ?? 'proposed'),
+          result: d?.result != null ? JSON.stringify(d.result) : prev[actionId]?.result,
+          error: !r.ok
+            ? ((d as { detail?: string } | null)?.detail ??
+              `Could not ${kind} this step.`)
+            : typeof d?.error === 'string'
+              ? d.error
+              : prev[actionId]?.error,
+          params: prev[actionId]?.params,
+        },
+      }))
+    } catch {
+      setStates((prev) => ({
+        ...prev,
+        [actionId]: {
+          ...(prev[actionId] ?? { status: 'proposed' }),
+          error: `Could not ${kind} this step.`,
+        },
+      }))
+    } finally {
+      setBusy(null)
+      // Refetch so a failed/rejected step's cascade (later steps → skipped) shows.
+      fetchAll()
+    }
+  }
+
+  const doneCount = statuses.filter((st) => st === 'executed').length
+  const halted =
+    actionableIdx === -1 &&
+    statuses.some((st) => ['failed', 'rejected', 'skipped'].includes(st))
+
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs">
+      <div className="flex items-center gap-2 border-b border-amber-500/20 px-2.5 py-2">
+        <ShieldCheck className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+        <span className="font-medium">Multi-step plan</span>
+        <span className="text-muted-foreground">
+          {doneCount}/{plan.steps.length} done
+          {halted ? ' · halted' : ''}
+        </span>
+      </div>
+      <ol className="min-w-0">
+        {plan.steps.map((s, i) => {
+          const stt = states[s.action_id] ?? { status: 'proposed' }
+          const meta = ACTION_STATUS[stt.status] ?? ACTION_STATUS.proposed
+          const isActionable = i === actionableIdx
+          const waiting = stt.status === 'proposed' && !isActionable
+          const isOpen = openId === s.action_id
+          return (
+            <li
+              key={s.action_id}
+              className={cn(
+                'min-w-0 border-t border-amber-500/20 px-2.5 py-2 first:border-t-0',
+                waiting && 'opacity-60'
+              )}
+            >
+              <div className="flex min-w-0 items-start gap-2">
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-muted font-mono text-[10px] font-semibold">
+                  {s.step}
+                </span>
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] font-semibold uppercase">
+                      {s.method}
+                    </span>
+                    <span className="min-w-0 truncate font-mono text-[11px] font-medium">
+                      {s.operation}
+                    </span>
+                  </div>
+                  {s.summary && (
+                    <div className="text-muted-foreground">{s.summary}</div>
+                  )}
+                  <div className={cn('text-[11px] font-medium', meta.cls)}>
+                    {waiting ? 'Waiting for earlier steps' : meta.label}
+                  </div>
+                  {(stt.params && stt.params !== '{}') ||
+                  stt.result ||
+                  stt.error ? (
+                    <button
+                      type="button"
+                      onClick={() => setOpenId(isOpen ? null : s.action_id)}
+                      className="mt-0.5 flex items-center gap-1 font-medium text-muted-foreground hover:text-foreground"
+                    >
+                      {isOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                      {stt.error ? 'Error' : stt.result ? 'Result' : 'Details'}
+                    </button>
+                  ) : null}
+                  {isOpen && (
+                    <div className="space-y-1 pt-1">
+                      {stt.params && stt.params !== '{}' && (
+                        <>
+                          <div className="font-medium text-muted-foreground">
+                            {isActionable ? 'Will send' : 'Sent'}
+                          </div>
+                          <ToolBlock value={stt.params} />
+                        </>
+                      )}
+                      {stt.error ? (
+                        <pre className={toolBlockClasses}>{stt.error}</pre>
+                      ) : stt.result ? (
+                        <ToolBlock value={stt.result} />
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {isActionable && (
+                <div className="mt-2 flex items-center gap-2 pl-6">
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs"
+                    disabled={busy !== null}
+                    onClick={() => act(s.action_id, 'confirm')}
+                  >
+                    {busy === s.action_id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                    Confirm step {s.step}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 gap-1 px-2 text-xs"
+                    disabled={busy !== null}
+                    onClick={() => act(s.action_id, 'reject')}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Reject
+                  </Button>
+                </div>
+              )}
+              {stt.status === 'failed' && onFix && (
+                <div className="mt-2 pl-6">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 px-2 text-xs"
+                    onClick={() =>
+                      onFix(
+                        buildFixMessage(s.operation, s.method, stt.params ?? null, stt.error ?? null)
+                      )
+                    }
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Fix with AI
+                  </Button>
+                </div>
+              )}
+            </li>
+          )
+        })}
+      </ol>
+    </div>
+  )
+}
+
+/** Route a `temps_write` tool part to the plan card or the single-action card. */
+function WriteProposalCard({
+  projectId,
+  tool,
+  onFix,
+}: {
+  projectId: number
+  tool: ToolCall
+  onFix?: (text: string) => void
+}) {
+  const plan = parsePlanProposal(tool.result)
+  if (plan) return <PlanActionCard projectId={projectId} plan={plan} onFix={onFix} />
+  return <PendingActionCard projectId={projectId} tool={tool} onFix={onFix} />
 }
 
 /**
@@ -629,10 +994,12 @@ function AssistantBody({
   message,
   streaming,
   projectId,
+  onFix,
 }: {
   message: ChatMessage
   streaming: boolean
   projectId: number
+  onFix?: (text: string) => void
 }) {
   const parts = assistantParts(message)
   if (parts.length === 0) {
@@ -645,10 +1012,11 @@ function AssistantBody({
           // A `temps_write` tool is a *proposed* mutation — render the human
           // confirm/reject gate instead of a read-only result card.
           part.tool.name === 'temps_write' ? (
-            <PendingActionCard
+            <WriteProposalCard
               key={part.tool.id}
               projectId={projectId}
               tool={part.tool}
+              onFix={onFix}
             />
           ) : (
             <ToolCard key={part.tool.id} tool={part.tool} />
@@ -1119,6 +1487,7 @@ export function DebugChatPanel({
                     message={m}
                     streaming={streaming && i === visible.length - 1}
                     projectId={projectId}
+                    onFix={(text) => void send(text)}
                   />
                 </div>
                 {m.created_at && assistantParts(m).length > 0 && (

@@ -11,6 +11,9 @@ pub use job_processor::*;
 pub mod workflow_planner;
 pub use workflow_planner::*;
 
+pub mod env_resolver;
+pub use env_resolver::*;
+
 pub mod workflow_execution_service;
 pub use workflow_execution_service::*;
 

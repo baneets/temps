@@ -670,15 +670,15 @@ export function DeploymentStages({
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'success':
-        return <CheckCircle2 className="h-5 w-5 text-green-500" />
+        return <CheckCircle2 className="h-4 w-4 text-green-500" />
       case 'failure':
-        return <XCircle className="h-5 w-5 text-red-500" />
+        return <XCircle className="h-4 w-4 text-red-500" />
       case 'running':
-        return <Loader2 className="h-5 w-5 text-orange-500 animate-spin" />
+        return <Loader2 className="h-4 w-4 text-orange-500 animate-spin" />
       case 'pending':
-        return <Loader2 className="h-5 w-5 text-muted-foreground" />
+        return <Loader2 className="h-4 w-4 text-muted-foreground" />
       case 'cancelled':
-        return <XCircle className="h-5 w-5 text-muted-foreground" />
+        return <XCircle className="h-4 w-4 text-muted-foreground" />
       default:
         return null
     }
@@ -723,21 +723,21 @@ export function DeploymentStages({
   return (
     <div className="space-y-4">
       {/* Stages */}
-      <div className="space-y-4 px-2 sm:px-0">
+      <div className="space-y-2 px-2 sm:px-0">
         {stagesQuery.data?.jobs.map((stage) => (
           <div
             key={stage.id}
             className="border rounded-lg overflow-hidden bg-card"
           >
-            {/* Fat Header */}
-            <div className="flex items-center justify-between px-6 py-4 bg-muted/30 hover:bg-muted/50 transition-colors">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-2.5 bg-muted/30 hover:bg-muted/50 transition-colors">
               <div
-                className="flex items-center gap-3 flex-1 cursor-pointer"
+                className="flex min-w-0 items-center gap-2.5 flex-1 cursor-pointer"
                 onClick={() => toggleStage(stage.id)}
               >
                 {getStatusIcon(stage.status)}
-                <div className="flex items-center gap-3">
-                  <h3 className="font-medium text-base">
+                <div className="flex min-w-0 items-center gap-3">
+                  <h3 className="font-medium text-sm">
                     {stage.name}
                     {stage.description && (
                       <span className="ml-2 font-normal text-sm text-muted-foreground">
@@ -794,9 +794,9 @@ export function DeploymentStages({
                   className="cursor-pointer"
                 >
                   {expandedStageIds.has(stage.id) ? (
-                    <ChevronUpIcon className="h-5 w-5 text-muted-foreground" />
+                    <ChevronUpIcon className="h-4 w-4 text-muted-foreground" />
                   ) : (
-                    <ChevronDownIcon className="h-5 w-5 text-muted-foreground" />
+                    <ChevronDownIcon className="h-4 w-4 text-muted-foreground" />
                   )}
                 </button>
               </div>

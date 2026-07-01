@@ -12,10 +12,10 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
 
+use temps_ai_api_tools::{ApiCallScope, WriteApiToolsHandle};
 use temps_auth::context::AuthContext;
 use temps_auth::permissions::Permission;
 use temps_entities::ai_pending_actions;
-use temps_ai_api_tools::{ApiCallScope, WriteApiToolsHandle};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -30,6 +30,12 @@ pub enum PendingActionError {
     #[error("pending action '{public_id}' has status '{status}', expected 'proposed'")]
     InvalidState { public_id: String, status: String },
 
+    #[error(
+        "step {step_index} of this plan cannot run yet — {pending} earlier step(s) \
+         are not completed; confirm them in order first"
+    )]
+    StepBlocked { step_index: i32, pending: usize },
+
     #[error("permission '{permission}' is required to confirm this action")]
     PermissionDenied { permission: String },
 
@@ -40,7 +46,10 @@ pub enum PendingActionError {
     Unavailable,
 
     #[error("execution of '{operation_id}' failed: {reason}")]
-    Execution { operation_id: String, reason: String },
+    Execution {
+        operation_id: String,
+        reason: String,
+    },
 
     #[error("database error: {0}")]
     Database(#[from] sea_orm::DbErr),
@@ -57,14 +66,8 @@ pub struct PendingActionService {
 }
 
 impl PendingActionService {
-    pub fn new(
-        db: Arc<DatabaseConnection>,
-        write_handle: Arc<WriteApiToolsHandle>,
-    ) -> Self {
-        Self {
-            db,
-            write_handle,
-        }
+    pub fn new(db: Arc<DatabaseConnection>, write_handle: Arc<WriteApiToolsHandle>) -> Self {
+        Self { db, write_handle }
     }
 
     /// Insert a new `proposed` pending action row.
@@ -104,6 +107,54 @@ impl PendingActionService {
         .insert(self.db.as_ref())
         .await?;
         Ok(model)
+    }
+
+    /// Insert a multi-step *plan*: an ordered chain of proposed mutations that
+    /// share a `plan_public_id` and are confirmed one at a time in `step_index`
+    /// order. `steps` is `(prepared, required_permission)` per step, already in
+    /// execution order. Returns the created rows (in order).
+    ///
+    /// A single-element `steps` still produces a grouped plan — callers that want
+    /// a standalone action use [`create`] instead (`plan_public_id = NULL`).
+    pub async fn create_plan(
+        &self,
+        conversation_id: i64,
+        project_id: i32,
+        steps: &[(temps_ai_api_tools::PreparedWrite, Option<String>)],
+        created_by: Option<i32>,
+    ) -> Result<Vec<ai_pending_actions::Model>, PendingActionError> {
+        let plan_public_id = uuid::Uuid::new_v4().simple().to_string();
+        let now = Utc::now();
+        let mut created = Vec::with_capacity(steps.len());
+        for (idx, (prepared, required_permission)) in steps.iter().enumerate() {
+            let public_id = uuid::Uuid::new_v4().simple().to_string();
+            let model = ai_pending_actions::ActiveModel {
+                public_id: Set(public_id),
+                conversation_id: Set(conversation_id),
+                message_id: Set(None),
+                project_id: Set(project_id),
+                plan_public_id: Set(Some(plan_public_id.clone())),
+                step_index: Set(idx as i32),
+                operation_id: Set(prepared.operation_id.clone()),
+                method: Set(prepared.method.clone()),
+                summary: Set(prepared.summary.clone()),
+                params: Set(prepared.params.clone()),
+                required_permission: Set(required_permission.clone()),
+                status: Set("proposed".to_string()),
+                result: Set(None),
+                error: Set(None),
+                created_by: Set(created_by),
+                confirmed_by: Set(None),
+                created_at: Set(now),
+                confirmed_at: Set(None),
+                executed_at: Set(None),
+                ..Default::default()
+            }
+            .insert(self.db.as_ref())
+            .await?;
+            created.push(model);
+        }
+        Ok(created)
     }
 
     /// Best-effort: set `message_id` on a batch of pending-action rows.
@@ -192,6 +243,11 @@ impl PendingActionService {
             });
         }
 
+        // 3b. Plan ordering: a chained step can only run once every earlier step
+        //     has executed. Blocks before the atomic claim so a premature confirm
+        //     never leaves a stuck "executing" row.
+        self.ensure_plan_step_ready(&action).await?;
+
         // 4. Advisory permission check using the caller's auth.
         //    This MUST run before the atomic claim so a denied user never leaves
         //    a stuck "executing" row.
@@ -233,7 +289,9 @@ impl PendingActionService {
             Some(c) => c,
             None => {
                 // Mark failed — we already claimed the row.
-                let _ = self.set_failed(&action, "Write caller not available (startup incomplete).").await;
+                let _ = self
+                    .set_failed(&action, "Write caller not available (startup incomplete).")
+                    .await;
                 return Err(PendingActionError::Unavailable);
             }
         };
@@ -263,7 +321,7 @@ impl PendingActionService {
                 .await?
             }
             Err(e) => {
-                ai_pending_actions::ActiveModel {
+                let failed = ai_pending_actions::ActiveModel {
                     id: Set(action.id),
                     status: Set("failed".to_string()),
                     error: Set(Some(e.to_string())),
@@ -272,7 +330,11 @@ impl PendingActionService {
                     ..Default::default()
                 }
                 .update(self.db.as_ref())
-                .await?
+                .await?;
+                // Stop-and-report: a failed step halts the plan — the later steps
+                // must not run against a failed prerequisite.
+                self.skip_remaining_steps(&action).await;
+                failed
             }
         };
 
@@ -331,6 +393,9 @@ impl PendingActionService {
         // Reload the row to return its current state.
         let updated = self.get(project_id, public_id).await?;
 
+        // Stop-and-report: rejecting a step halts the rest of the plan.
+        self.skip_remaining_steps(&updated).await;
+
         // Audit is emitted by the handler with full RequestMetadata (ip/user_agent).
         Ok(updated)
     }
@@ -341,16 +406,65 @@ impl PendingActionService {
     /// project cannot be loaded. Called at the start of both `confirm` and
     /// `reject` so the toggle is enforced even after a row was proposed while
     /// the feature was on.
-    async fn check_write_actions_enabled(
-        &self,
-        project_id: i32,
-    ) -> Result<(), PendingActionError> {
+    async fn check_write_actions_enabled(&self, project_id: i32) -> Result<(), PendingActionError> {
         let project = temps_entities::projects::Entity::find_by_id(project_id)
             .one(self.db.as_ref())
             .await?;
         match project {
             Some(p) if p.ai_write_actions_enabled => Ok(()),
             _ => Err(PendingActionError::Disabled { project_id }),
+        }
+    }
+
+    /// Enforce step ordering for a plan: a step can only run once every earlier
+    /// step (lower `step_index`, same `plan_public_id`) has `executed`. Standalone
+    /// actions (`plan_public_id = None`) and the first step are always ready.
+    ///
+    /// Returns [`PendingActionError::StepBlocked`] listing how many earlier steps
+    /// are still incomplete, so the UI/caller can explain why nothing ran.
+    async fn ensure_plan_step_ready(
+        &self,
+        action: &ai_pending_actions::Model,
+    ) -> Result<(), PendingActionError> {
+        let (Some(plan_id), true) = (action.plan_public_id.as_ref(), action.step_index > 0) else {
+            return Ok(());
+        };
+        let earlier = ai_pending_actions::Entity::find()
+            .filter(ai_pending_actions::Column::PlanPublicId.eq(plan_id))
+            .filter(ai_pending_actions::Column::StepIndex.lt(action.step_index))
+            .all(self.db.as_ref())
+            .await?;
+        let pending = earlier.iter().filter(|s| s.status != "executed").count();
+        if pending > 0 {
+            return Err(PendingActionError::StepBlocked {
+                step_index: action.step_index,
+                pending,
+            });
+        }
+        Ok(())
+    }
+
+    /// Halt a plan after a step failed or was rejected: mark every later step
+    /// (`step_index` greater than `after`, same plan, still `proposed`) as
+    /// `skipped` so the UI stops offering them and the chain doesn't proceed.
+    /// No-op for standalone actions. Best-effort — errors are swallowed since the
+    /// triggering step's outcome is already persisted.
+    async fn skip_remaining_steps(&self, action: &ai_pending_actions::Model) {
+        let Some(plan_id) = action.plan_public_id.as_ref() else {
+            return;
+        };
+        let res = ai_pending_actions::Entity::update_many()
+            .col_expr(
+                ai_pending_actions::Column::Status,
+                sea_orm::sea_query::Expr::value("skipped"),
+            )
+            .filter(ai_pending_actions::Column::PlanPublicId.eq(plan_id))
+            .filter(ai_pending_actions::Column::StepIndex.gt(action.step_index))
+            .filter(ai_pending_actions::Column::Status.eq("proposed"))
+            .exec(self.db.as_ref())
+            .await;
+        if let Err(e) = res {
+            tracing::warn!("Failed to skip remaining steps of plan {}: {}", plan_id, e);
         }
     }
 
@@ -404,6 +518,8 @@ mod tests {
             conversation_id: 1,
             message_id: None,
             project_id,
+            plan_public_id: None,
+            step_index: 0,
             operation_id: "redeploy_deployment".to_string(),
             method: "POST".to_string(),
             summary: "POST ... — redeploy_deployment".to_string(),
@@ -587,6 +703,54 @@ mod tests {
             matches!(err, PendingActionError::InvalidState { .. }),
             "unexpected: {err:?}"
         );
+    }
+
+    // confirm: a plan step whose earlier step hasn't executed → StepBlocked
+    // (before any atomic claim). Query order: get(action) → enabled(project) →
+    // status-proposed ok → ensure_plan_step_ready loads earlier steps.
+    #[tokio::test]
+    async fn test_confirm_plan_step_blocked_when_prior_step_incomplete() {
+        // step 2 of a plan (step_index = 1)
+        let mut step2 = make_proposed(2, "step2", 7);
+        step2.plan_public_id = Some("plan-abc".to_string());
+        step2.step_index = 1;
+        // its predecessor, still "proposed" (not executed)
+        let mut step1 = make_proposed(1, "step1", 7);
+        step1.plan_public_id = Some("plan-abc".to_string());
+        step1.step_index = 0;
+
+        let project = make_project(7, true); // toggle ON
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![step2]]) // get()
+            .append_query_results(vec![vec![project]]) // check enabled
+            .append_query_results(vec![vec![step1]]) // ensure_plan_step_ready: earlier steps
+            .into_connection();
+        let svc = make_svc(db);
+        let auth = make_auth();
+        let err = svc
+            .confirm(7, "step2", &auth, Some(1))
+            .await
+            .expect_err("step 2 must be blocked until step 1 executes");
+        assert!(
+            matches!(
+                err,
+                PendingActionError::StepBlocked {
+                    step_index: 1,
+                    pending: 1
+                }
+            ),
+            "unexpected: {err:?}"
+        );
+    }
+
+    // A standalone action (no plan) is never blocked by the ordering guard.
+    #[tokio::test]
+    async fn test_ensure_plan_step_ready_ignores_standalone() {
+        let standalone = make_proposed(1, "solo", 7); // plan_public_id None, step_index 0
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let svc = make_svc(db);
+        // No earlier-steps query is issued for a standalone action.
+        assert!(svc.ensure_plan_step_ready(&standalone).await.is_ok());
     }
 
     // reject: proposed → rejected (atomic path: exec_result 1 row, then get).

@@ -27,8 +27,8 @@ use temps_core::{AuditContext, AuditLogger, RequestMetadata};
 use temps_entities::{ai_conversations, ai_messages, ai_pending_actions};
 
 use crate::audit::{
-    AiActionConfirmedAudit, AiActionRejectedAudit, ChatMessageSentAudit,
-    ConversationArchivedAudit, ConversationCreatedAudit,
+    AiActionConfirmedAudit, AiActionRejectedAudit, ChatMessageSentAudit, ConversationArchivedAudit,
+    ConversationCreatedAudit, ConversationRenamedAudit,
 };
 use crate::pending_actions::{PendingActionError, PendingActionService};
 use crate::service::ChatStreamEvent;
@@ -180,6 +180,12 @@ pub struct FindConversationQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct RenameConversationRequest {
+    /// New human-facing title. Trimmed; must be non-empty after trimming.
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
     pub content: String,
     /// Optional, client-supplied description of the page/entity the user is
@@ -246,6 +252,11 @@ impl From<PendingActionError> for Problem {
             PendingActionError::InvalidState { .. } => {
                 problemdetails::new(axum::http::StatusCode::CONFLICT)
                     .with_title("Invalid Action State")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::StepBlocked { .. } => {
+                problemdetails::new(axum::http::StatusCode::CONFLICT)
+                    .with_title("Plan Step Not Ready")
                     .with_detail(e.to_string())
             }
             PendingActionError::PermissionDenied { .. } => {
@@ -315,6 +326,12 @@ pub struct PendingActionResponse {
     pub method: String,
     pub summary: String,
     pub status: String,
+    /// Set when this action is one step of a multi-step plan (chained actions);
+    /// all steps of the plan share this id. Absent for standalone single actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_public_id: Option<String>,
+    /// 0-based order of this step within its plan (0 for standalone actions).
+    pub step_index: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_permission: Option<String>,
     /// The flat params to be replayed at execute time (shown pre-execution for review).
@@ -338,6 +355,8 @@ impl From<ai_pending_actions::Model> for PendingActionResponse {
             method: m.method,
             summary: m.summary,
             status: m.status,
+            plan_public_id: m.plan_public_id,
+            step_index: m.step_index,
             required_permission: m.required_permission,
             // Scrub sensitive values (e.g. env-var values) before returning to
             // clients who may only hold a broad read permission.
@@ -399,6 +418,8 @@ const MAX_CONTEXT_ID_LEN: usize = 128;
 const MAX_MESSAGE_CONTENT_LEN: usize = 32_000;
 /// Cap on the advisory `page_context` (well under a message; it's framing).
 const MAX_PAGE_CONTEXT_LEN: usize = 4_000;
+/// Cap on a user-supplied conversation title (a short label, not prose).
+const MAX_TITLE_LEN: usize = 200;
 
 /// 400 for an over-length input field.
 fn too_long(field: &str, max: usize) -> Problem {
@@ -725,6 +746,58 @@ pub async fn archive_conversation(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Rename a conversation (set its human-facing title).
+#[utoipa::path(
+    patch, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/conversations/{public_id}",
+    params(("project_id" = i32, Path,), ("public_id" = String, Path,)),
+    request_body = RenameConversationRequest,
+    responses((status = 200, body = ConversationResponse), (status = 400), (status = 401), (status = 403), (status = 404)),
+    security(("bearer_auth" = []))
+)]
+pub async fn rename_conversation(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, public_id)): Path<(i32, String)>,
+    Json(req): Json<RenameConversationRequest>,
+) -> Result<Json<ConversationResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err(problemdetails::new(axum::http::StatusCode::BAD_REQUEST)
+            .with_title("Invalid Title")
+            .with_detail("Conversation title cannot be empty."));
+    }
+    if title.len() > MAX_TITLE_LEN {
+        return Err(too_long("title", MAX_TITLE_LEN));
+    }
+
+    let conv = state
+        .service
+        .get_by_public_id(project_id, &public_id)
+        .await?;
+    let updated = state.service.rename(&conv, title).await?;
+
+    state
+        .audit(&ConversationRenamedAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            project_id,
+            conversation_id: updated.public_id.clone(),
+            title: title.to_string(),
+        })
+        .await;
+
+    Ok(Json(ConversationResponse::from(updated)))
+}
+
 // --- Pending-action handlers -------------------------------------------------
 
 /// List all pending actions for a conversation (most-recently-proposed first).
@@ -759,7 +832,9 @@ pub async fn list_pending_actions(
         .list_for_conversation(project_id, conv.id)
         .await
         .map_err(Problem::from)?;
-    Ok(Json(rows.into_iter().map(PendingActionResponse::from).collect()))
+    Ok(Json(
+        rows.into_iter().map(PendingActionResponse::from).collect(),
+    ))
 }
 
 /// Get a single pending action by its public id (scoped to the project).
@@ -906,7 +981,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}",
-            get(get_conversation),
+            get(get_conversation).patch(rename_conversation),
         )
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}/messages",
@@ -945,6 +1020,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_conversation,
         send_message,
         archive_conversation,
+        rename_conversation,
         list_pending_actions,
         get_pending_action,
         confirm_pending_action,
@@ -958,6 +1034,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         MessagePart,
         ConversationDetailResponse,
         CreateConversationRequest,
+        RenameConversationRequest,
         SendMessageRequest,
         ToolCallEvent,
         ToolResultEvent,

@@ -3725,11 +3725,15 @@ export type DeploymentConfig = {
      */
     containerExecEnabled?: boolean;
     /**
-     * CPU limit in millicores (e.g., 2000 = 2 CPUs)
+     * CPU limit in microcores, where 1_000_000 = 1 full CPU core
+     * (e.g., 2_000_000 = 2 CPUs). NOT millicores. `None` = uncapped.
      */
     cpuLimit?: number | null;
     /**
-     * CPU request in millicores (e.g., 100 = 0.1 CPU, 1000 = 1 CPU)
+     * CPU request in microcores, where 1_000_000 = 1 full CPU core
+     * (e.g., 100_000 = 0.1 CPU, 500_000 = 0.5 CPU, 2_000_000 = 2 CPUs).
+     * NOT millicores — the deployer formats this as `{n}u` and converts
+     * `n / 1_000_000` cores into Docker nano_cpus.
      */
     cpuRequest?: number | null;
     /**
@@ -11667,6 +11671,13 @@ export type RemoteDeploymentResponse = {
 export type RemoveNodeResponse = {
     id: number;
     message: string;
+};
+
+export type RenameConversationRequest = {
+    /**
+     * New human-facing title. Trimmed; must be non-empty after trimming.
+     */
+    title: string;
 };
 
 export type RepositoryListQuery = {
@@ -32887,6 +32898,29 @@ export type GetConversationResponses = {
 };
 
 export type GetConversationResponse = GetConversationResponses[keyof GetConversationResponses];
+
+export type RenameConversationData = {
+    body: RenameConversationRequest;
+    path: {
+        project_id: number;
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}';
+};
+
+export type RenameConversationErrors = {
+    400: unknown;
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type RenameConversationResponses = {
+    200: ConversationResponse;
+};
+
+export type RenameConversationResponse = RenameConversationResponses[keyof RenameConversationResponses];
 
 export type ArchiveConversationData = {
     body?: never;
