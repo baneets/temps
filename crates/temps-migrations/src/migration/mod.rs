@@ -131,6 +131,8 @@ mod m20260628_000001_add_node_to_log_chunks;
 mod m20260628_000001_otel_spans_root_index;
 mod m20260629_000001_otel_metrics_full_fidelity;
 mod m20260629_000002_add_provider_default_model;
+mod m20260701_000001_add_provider_webhook_tokens;
+mod m20260701_000002_add_bitbucket_webhook_hook_id;
 
 pub struct Migrator;
 
@@ -265,6 +267,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260628_000001_otel_spans_root_index::Migration),
             Box::new(m20260629_000001_otel_metrics_full_fidelity::Migration),
             Box::new(m20260629_000002_add_provider_default_model::Migration),
+            Box::new(m20260701_000001_add_provider_webhook_tokens::Migration),
+            Box::new(m20260701_000002_add_bitbucket_webhook_hook_id::Migration),
         ]
     }
 }
