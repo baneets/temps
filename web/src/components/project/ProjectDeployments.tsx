@@ -59,6 +59,10 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
   const [staticEnv, setStaticEnv] = useState<string>('')
   const [staticFile, setStaticFile] = useState<File | null>(null)
   const [staticUploading, setStaticUploading] = useState(false)
+  // Docker-image deploy: deploy a specific (possibly new) image ref.
+  const [imageDialogOpen, setImageDialogOpen] = useState(false)
+  const [imageEnv, setImageEnv] = useState<string>('')
+  const [imageRefInput, setImageRefInput] = useState<string>('')
   const [searchParams, setSearchParams] = useSearchParams()
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const initialDeploymentCountRef = useRef<number | null>(null)
@@ -363,6 +367,31 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
     meta: { errorTitle: 'Failed to deploy static files' },
   })
 
+  const deployImageMut = useMutation({
+    ...deployFromImageMutation(),
+    meta: { errorTitle: 'Failed to deploy image' },
+  })
+
+  // Deploy a specific image ref (may differ from the last one) to an environment.
+  const handleDeployImage = async () => {
+    const ref = imageRefInput.trim()
+    if (!ref || !imageEnv) return
+    try {
+      await deployImageMut.mutateAsync({
+        path: { project_id: project.id, environment_id: parseInt(imageEnv) },
+        body: { image_ref: ref },
+      })
+      toast.success('Image deployment started')
+      setImageDialogOpen(false)
+      setImageEnv('')
+      refetch()
+    } catch (e) {
+      toast.error(
+        (e as { detail?: string })?.detail || 'Failed to deploy image'
+      )
+    }
+  }
+
   // Upload the chosen bundle (multipart — file bodies don't go cleanly through
   // the generated SDK, so this uses a raw fetch), then deploy it to the selected
   // environment. Both steps require DeploymentsCreate.
@@ -413,6 +442,85 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
       (env) => env.id !== deployment.environment_id
     )
   }
+
+  // Shared image-deploy dialog — lets a docker_image project deploy a specific
+  // (possibly new) image ref, instead of only re-pulling the last one.
+  const imageDeployDialog = (
+    <Dialog
+      open={imageDialogOpen}
+      onOpenChange={(open) => {
+        if (!open && !deployImageMut.isPending) {
+          setImageDialogOpen(false)
+          setImageEnv('')
+        }
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload className="h-5 w-5" />
+            Deploy image
+          </DialogTitle>
+          <DialogDescription>
+            Pull a prebuilt Docker image from a registry and deploy it to an
+            environment.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="space-y-2">
+            <Label htmlFor="image-ref">Image reference</Label>
+            <Input
+              id="image-ref"
+              placeholder="ghcr.io/org/app:v1.2.3"
+              value={imageRefInput}
+              disabled={deployImageMut.isPending}
+              onChange={(e) => setImageRefInput(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Environment</Label>
+            <Select value={imageEnv} onValueChange={setImageEnv}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select environment..." />
+              </SelectTrigger>
+              <SelectContent>
+                {(
+                  environmentsQuery.data as EnvironmentResponse[] | undefined
+                )?.map((env) => (
+                  <SelectItem key={env.id} value={String(env.id)}>
+                    {env.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            disabled={deployImageMut.isPending}
+            onClick={() => {
+              setImageDialogOpen(false)
+              setImageEnv('')
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleDeployImage}
+            disabled={
+              !imageRefInput.trim() || !imageEnv || deployImageMut.isPending
+            }
+          >
+            {deployImageMut.isPending && (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            )}
+            {deployImageMut.isPending ? 'Deploying...' : 'Deploy image'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 
   // Shared static-deploy dialog — rendered from both the populated list and the
   // empty state (a brand-new static project has no deployments yet).
@@ -550,6 +658,16 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
                 <Upload className="h-4 w-4 mr-2" />
                 Deploy static files
               </Button>
+            ) : project.source_type === 'docker_image' ? (
+              <Button
+                onClick={() => {
+                  setImageRefInput(imageRef ?? '')
+                  setImageDialogOpen(true)
+                }}
+              >
+                <PlusIcon className="h-4 w-4 mr-2" />
+                New Deployment
+              </Button>
             ) : (
               <Button onClick={handleOpenNewDeployment}>
                 <PlusIcon className="h-4 w-4 mr-2" />
@@ -563,6 +681,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
           }
         />
         {staticDeployDialog}
+        {imageDeployDialog}
         <RedeploymentModal
           project={project}
           isOpen={isRedeployModalOpen}
@@ -623,23 +742,32 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
             {isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:w-auto">
-          {project.source_type === 'static_files' && (
-            <Button
-              variant="outline"
-              onClick={() => setStaticDialogOpen(true)}
-              className="w-full sm:w-auto"
-            >
-              <Upload className="h-4 w-4 mr-2" />
-              Deploy static files
-            </Button>
-          )}
+        {project.source_type === 'static_files' ? (
+          <Button
+            onClick={() => setStaticDialogOpen(true)}
+            className="w-full sm:w-auto"
+          >
+            <Upload className="h-4 w-4 mr-2" />
+            Deploy static files
+          </Button>
+        ) : project.source_type === 'docker_image' ? (
+          <Button
+            onClick={() => {
+              setImageRefInput(imageRef ?? '')
+              setImageDialogOpen(true)
+            }}
+            className="w-full sm:w-auto"
+          >
+            <PlusIcon className="h-4 w-4 mr-2" />
+            New Deployment
+          </Button>
+        ) : (
           <Button onClick={handleOpenNewDeployment} className="w-full sm:w-auto">
             <PlusIcon className="h-4 w-4 mr-2" />
             New Deployment
             <KeyboardShortcut shortcut="N" onTrigger={handleOpenNewDeployment} />
           </Button>
-        </div>
+        )}
       </div>
 
       <Card>
@@ -802,8 +930,9 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
         </DialogContent>
       </Dialog>
 
-      {/* Deploy static files dialog */}
+      {/* Manual deploy dialogs */}
       {staticDeployDialog}
+      {imageDeployDialog}
     </>
   )
 }
