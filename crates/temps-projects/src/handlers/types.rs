@@ -197,6 +197,14 @@ pub struct CreateProjectRequest {
     pub source_type: SourceType,
 }
 
+/// Change a project's source type to a Git-less type (docker_image /
+/// static_files / manual). Switching TO `git` is done via the Git settings
+/// endpoint (which also supplies the repository + provider connection).
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ChangeProjectSourceRequest {
+    pub source_type: SourceType,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct TriggerPipelinePayload {
     pub branch: Option<String>,

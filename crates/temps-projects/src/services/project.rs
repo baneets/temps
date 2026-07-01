@@ -597,6 +597,65 @@ impl ProjectService {
         Ok(project_found)
     }
 
+    /// Change a project's source type to a Git-less type (docker_image /
+    /// static_files / manual). Switching TO Git is rejected here because that
+    /// needs repo + provider-connection config — it goes through
+    /// [`Self::update_git_settings`] instead (which sets `source_type = Git`).
+    pub async fn set_source_type(
+        &self,
+        project_id: i32,
+        source_type: temps_entities::source_type::SourceType,
+    ) -> Result<Project, ProjectError> {
+        use temps_entities::source_type::SourceType;
+        let project = projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ProjectError::NotFound(format!(
+                "project {} not found",
+                project_id
+            )))?;
+
+        // Switching to Git is a direct flip only when a repository is already
+        // configured (repo owner + name). A project can carry git info without
+        // being Git-typed — that's a one-click switch. Otherwise the user must
+        // set a repository up first (via Git settings).
+        if matches!(source_type, SourceType::Git) {
+            let has_repo = !project.repo_owner.trim().is_empty()
+                && !project.repo_name.trim().is_empty()
+                && project.repo_owner != "unknown"
+                && project.repo_name != "unknown";
+            if !has_repo {
+                return Err(ProjectError::InvalidInput(
+                    "To switch to a Git source, configure a repository in Git settings \
+                     (a provider connection, repository, and branch are required)."
+                        .to_string(),
+                ));
+            }
+        }
+
+        let mut active_project: projects::ActiveModel = project.into();
+        active_project.source_type = Set(source_type);
+        active_project.updated_at = Set(chrono::Utc::now());
+        let updated = active_project.update(self.db.as_ref()).await?;
+        let updated = Self::map_db_project_to_project(updated);
+
+        // Deploy routing / behavior keys off source_type — notify consumers.
+        if let Err(e) = self
+            .queue_service
+            .send(Job::ProjectUpdated(ProjectUpdatedJob {
+                project_id: updated.id,
+                project_name: updated.name.clone(),
+            }))
+            .await
+        {
+            warn!(
+                "Failed to emit ProjectUpdated after source-type change for {}: {}",
+                updated.id, e
+            );
+        }
+        Ok(updated)
+    }
+
     pub async fn delete_project(
         &self,
         project_id: i32,
@@ -1080,6 +1139,10 @@ impl ProjectService {
         active_project.repo_owner = Set(repo_owner.clone());
         active_project.repo_name = Set(repo_name.clone());
         active_project.directory = Set(directory);
+        // Configuring a Git repository makes this a Git-source project — this is
+        // how a docker_image / static_files project is converted to Git (the
+        // reverse conversion goes through `set_source_type`).
+        active_project.source_type = Set(temps_entities::source_type::SourceType::Git);
 
         if let Some(preset_value) = preset {
             // Parse preset string to enum

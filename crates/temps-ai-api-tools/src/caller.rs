@@ -316,8 +316,22 @@ pub fn build_request_parts(
         }
     }
 
+    // When the operation declares a JSON request body (any Body-location param),
+    // always send at least an empty object so the request carries
+    // `Content-Type: application/json`. Handlers whose body fields are all
+    // optional (e.g. DeployFromImageRequest) accept `{}`, and axum's `Json`
+    // extractor 415s on a missing content type — so an empty body must still be
+    // sent as `{}`, not omitted. GET/DELETE ops without a body stay body-less.
+    let op_expects_body = op
+        .params
+        .iter()
+        .any(|p| matches!(p.location, ParamLocation::Body));
     let body = if body_map.is_empty() {
-        None
+        if op_expects_body {
+            Some(Value::Object(serde_json::Map::new()))
+        } else {
+            None
+        }
     } else {
         Some(Value::Object(body_map))
     };
@@ -1264,6 +1278,38 @@ mod tests {
         assert!(
             body.get("description").is_none(),
             "absent optional body param must be omitted"
+        );
+    }
+
+    #[test]
+    fn all_optional_body_params_absent_still_sends_empty_json_object() {
+        // A body operation whose fields are ALL optional (e.g. DeployFromImageRequest)
+        // with none supplied must still produce an empty `{}` body so the replay
+        // carries `Content-Type: application/json` — otherwise axum's `Json`
+        // extractor returns 415, not a useful validation error.
+        let op = make_write_op(
+            "deploy_from_image",
+            "POST",
+            "/projects/{project_id}/environments/{environment_id}/deploy/image",
+            "Deployments",
+            vec![
+                path_param("project_id"),
+                path_param("environment_id"),
+                body_param("image_ref", false),
+                body_param("external_image_id", false),
+            ],
+        );
+
+        let params = serde_json::json!({ "project_id": 1, "environment_id": 5 });
+        let result = build_request_parts(&op, &params, &[1], 20, 100).expect("should succeed");
+
+        let body = result
+            .body
+            .expect("op declares a JSON body → send `{}`, not None");
+        assert_eq!(
+            body,
+            serde_json::json!({}),
+            "empty body must be an empty object, not null/absent"
         );
     }
 
