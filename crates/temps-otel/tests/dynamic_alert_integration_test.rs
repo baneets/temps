@@ -27,7 +27,8 @@ use temps_otel::handlers::metric_alert_handler::{delete_alert, MetricAlertScopeP
 use temps_otel::ingest::auth::OtelAuthService;
 use temps_otel::ingest::rate_limit::RateLimiter;
 use temps_otel::services::{
-    MetricAlertEvaluator, MetricAlertService, MetricDashboardService, OtelService,
+    CrossProjectTraceService, MetricAlertEvaluator, MetricAlertService, MetricDashboardService,
+    OtelService,
 };
 use temps_otel::storage::timescaledb::TimescaleDbStorage;
 use temps_otel::storage::OtelStorage;
@@ -669,6 +670,10 @@ async fn test_delete_alert_rejects_cross_project_rule_id_before_touching_evaluat
     // Build the same `OtelAppState` the real router constructs, so the handler
     // runs exactly as it does in production.
     let dashboard_service = Arc::new(MetricDashboardService::new(ctx.db.clone()));
+    let cross_project_service = Arc::new(CrossProjectTraceService::new(
+        ctx.db.clone(),
+        Arc::new(TimescaleDbStorage::new(ctx.db.clone(), None)),
+    ));
     let app_state = OtelAppState {
         otel_service: ctx.otel_service.clone(),
         metrics_store: None,
@@ -677,6 +682,8 @@ async fn test_delete_alert_rejects_cross_project_rule_id_before_touching_evaluat
         metric_alert_service: ctx.alert_service.clone(),
         metric_alert_evaluator: ctx.evaluator.clone(),
         audit_service: Arc::new(NoOpAuditLogger),
+        cross_project_service,
+        trace_hint_tx: None,
     };
 
     let attacker_auth = AuthContext::new_session(attacker_user, Role::Admin);

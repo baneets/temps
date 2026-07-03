@@ -186,6 +186,10 @@ async fn setup_e2e() -> Option<(
         db.clone(),
     ));
     let metric_alert_service = Arc::new(temps_otel::services::MetricAlertService::new(db.clone()));
+    let cross_project_service = Arc::new(temps_otel::services::CrossProjectTraceService::new(
+        db.clone(),
+        Arc::new(TimescaleDbStorage::new(db.clone(), None)),
+    ));
     // Build the shared evaluator so OtelAppState is complete (ADR-026 Phase 3).
     // Both AlarmService instances wrap the same no-op notify/queue stubs.
     let notify: Arc<dyn temps_core::notifications::NotificationService> =
@@ -217,6 +221,8 @@ async fn setup_e2e() -> Option<(
         metric_alert_service,
         metric_alert_evaluator,
         audit_service: Arc::new(NoOpAuditLogger),
+        cross_project_service,
+        trace_hint_tx: None,
     };
 
     // Create auth middleware that injects AuthContext into request extensions.
