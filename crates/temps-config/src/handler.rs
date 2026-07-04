@@ -136,6 +136,10 @@ pub struct AppSettingsResponse {
     /// wizard checks this field on load and skips itself when true.
     pub setup_complete: bool,
 
+    /// When enabled, Admin-role accounts without MFA enrolled are rejected
+    /// at password login (bherila/temps#32). SSO/OIDC logins are unaffected.
+    pub require_mfa_for_admins: bool,
+
     /// Cluster-DNS resolver settings (ADR-024, experimental beta). No masking
     /// needed — `enabled` is a plain bool with no sensitive content. Passed
     /// through as-is so the settings UI can read and toggle the flag.
@@ -338,6 +342,7 @@ impl From<AppSettings> for AppSettingsResponse {
             monitoring: MonitoringSettingsMasked::from(settings.monitoring),
             insecure_tls: settings.insecure_tls,
             setup_complete: settings.setup_complete,
+            require_mfa_for_admins: settings.require_mfa_for_admins,
             cluster_dns: settings.cluster_dns,
         }
     }
