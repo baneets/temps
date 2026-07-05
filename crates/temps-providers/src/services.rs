@@ -1,7 +1,13 @@
 use crate::externalsvc::{
-    mongodb::MongodbService, postgres::PostgresService, postgres_cluster::PostgresClusterService,
-    redis::RedisService, rustfs::RustfsService, s3::S3Service, AvailableContainer,
-    ClusterMemberSpec, ExternalService, HealthProbeStatus, ServiceConfig, ServiceType,
+    mariadb::{MariaDbService, MariaDbSizeProfile},
+    mongodb::MongodbService,
+    postgres::PostgresService,
+    postgres_cluster::PostgresClusterService,
+    redis::RedisService,
+    rustfs::RustfsService,
+    s3::S3Service,
+    AvailableContainer, ClusterMemberSpec, ExternalService, HealthProbeStatus, ServiceConfig,
+    ServiceType,
 };
 use crate::parameter_strategies;
 use crate::remote_service_client::{
@@ -823,6 +829,7 @@ impl ExternalServiceManager {
         service_type: ServiceType,
     ) -> Box<dyn ExternalService> {
         match service_type {
+            ServiceType::Mariadb => Box::new(MariaDbService::new(name, self.docker.clone())),
             ServiceType::Mongodb => Box::new(MongodbService::new(name, self.docker.clone())),
             ServiceType::Postgres => Box::new(PostgresService::new(name, self.docker.clone())),
             // Note: PostgresCluster is handled via create_cluster_service_instance, not here
@@ -908,6 +915,41 @@ impl ExternalServiceManager {
         parameters: &HashMap<String, String>,
     ) -> Result<RemoteServiceCreateParams, ExternalServiceError> {
         let (image, container_port, env, volume_path, command) = match service_type {
+            ServiceType::Mariadb => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "mariadb:lts".to_string());
+                let size_profile = parameters
+                    .get("size_profile")
+                    .and_then(|value| MariaDbSizeProfile::parse(value))
+                    .unwrap_or_default();
+                let root_password = parameters.get("root_password").cloned().unwrap_or_default();
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let database = parameters
+                    .get("database")
+                    .cloned()
+                    .unwrap_or_else(|| "app".to_string());
+                let username = parameters
+                    .get("username")
+                    .cloned()
+                    .unwrap_or_else(|| "app".to_string());
+
+                let env = HashMap::from([
+                    ("MARIADB_ROOT_PASSWORD".to_string(), root_password),
+                    ("MARIADB_DATABASE".to_string(), database),
+                    ("MARIADB_USER".to_string(), username),
+                    ("MARIADB_PASSWORD".to_string(), password),
+                    ("MARIADB_AUTO_UPGRADE".to_string(), "1".to_string()),
+                ]);
+                (
+                    image,
+                    3306u16,
+                    env,
+                    "/var/lib/mysql".to_string(),
+                    Some(size_profile.server_args()),
+                )
+            }
             ServiceType::Postgres => {
                 let image = parameters
                     .get("docker_image")
@@ -1069,30 +1111,10 @@ impl ExternalServiceManager {
         let container_name_for_volume = format!("{}-{}", service_type, service_name);
         let volume_name = format!("{}_data", container_name_for_volume);
 
-        // Resource limits, when provided, are stored as flat string keys in
-        // `parameters` (set alongside `memory_mb=512`, `nano_cpus=1000000000`,
-        // etc.) so they survive the `HashMap<String, String>` round-trip
-        // used by the cluster manager. Missing keys → unlimited.
-        let resource_limits = {
-            let parse_i64 = |key: &str| -> Option<i64> {
-                parameters
-                    .get(key)
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-                    .filter(|&n| n > 0)
-            };
-            let limits = crate::externalsvc::ServiceResourceLimits {
-                memory_mb: parse_i64("memory_mb"),
-                memory_swap_mb: parse_i64("memory_swap_mb"),
-                nano_cpus: parse_i64("nano_cpus"),
-                cpu_shares: parse_i64("cpu_shares"),
-                shm_size_mb: parse_i64("shm_size_mb"),
-            };
-            if limits.is_unlimited() {
-                None
-            } else {
-                Some(limits)
-            }
-        };
+        // Resource limits may arrive as the modern nested `resources` block or
+        // as legacy flat string keys (`memory_mb=512`, `nano_cpus=1000000000`,
+        // etc.). Missing limits mean unlimited.
+        let resource_limits = Self::remote_resource_limits_from_parameters(parameters);
 
         Ok(RemoteServiceCreateParams {
             name: container_name,
@@ -1108,6 +1130,39 @@ impl ExternalServiceManager {
             command,
             resource_limits,
         })
+    }
+
+    fn remote_resource_limits_from_parameters(
+        parameters: &HashMap<String, String>,
+    ) -> Option<crate::externalsvc::ServiceResourceLimits> {
+        if let Some(resources) = parameters.get("resources") {
+            if let Ok(limits) =
+                serde_json::from_str::<crate::externalsvc::ServiceResourceLimits>(resources)
+            {
+                if !limits.is_unlimited() {
+                    return Some(limits);
+                }
+            }
+        }
+
+        let parse_i64 = |key: &str| -> Option<i64> {
+            parameters
+                .get(key)
+                .and_then(|s| s.trim().parse::<i64>().ok())
+                .filter(|&n| n > 0)
+        };
+        let limits = crate::externalsvc::ServiceResourceLimits {
+            memory_mb: parse_i64("memory_mb"),
+            memory_swap_mb: parse_i64("memory_swap_mb"),
+            nano_cpus: parse_i64("nano_cpus"),
+            cpu_shares: parse_i64("cpu_shares"),
+            shm_size_mb: parse_i64("shm_size_mb"),
+        };
+        if limits.is_unlimited() {
+            None
+        } else {
+            Some(limits)
+        }
     }
 
     /// Get the container name for a service (used for remote operations).
@@ -1659,6 +1714,32 @@ impl ExternalServiceManager {
         let mut service_update: external_services::ActiveModel = service.clone().into();
         service_update.config = Set(Some(encrypted_config));
         if let Some(new_name) = request.name {
+            if new_name != service.name {
+                // The running container is identified by the service's
+                // current (pre-rename) name (see create_service_instance).
+                // initialize_service() below rebuilds its stop-then-recreate
+                // instance from whatever name is in the DB at that point --
+                // if we persist the rename first, it looks for a container
+                // under the *new* name, finds nothing, and the still-running
+                // old container is left holding the host port, so the new
+                // container's start fails with "port is already allocated".
+                // Stop the old container by its pre-rename identity first.
+                let service_type_enum =
+                    ServiceType::from_str(&service.service_type).map_err(|_| {
+                        ExternalServiceError::InvalidServiceType {
+                            id: service_id,
+                            service_type: service.service_type.clone(),
+                        }
+                    })?;
+                let old_instance =
+                    self.create_service_instance(service.name.clone(), service_type_enum);
+                if let Err(e) = old_instance.stop().await {
+                    info!(
+                        "Could not stop pre-rename container for service {} (may not exist): {}",
+                        service_id, e
+                    );
+                }
+            }
             let new_slug = Self::generate_slug(&new_name);
             service_update.name = Set(new_name);
             service_update.slug = Set(Some(new_slug));
@@ -6707,7 +6788,12 @@ echo "[restore] Pre-seed complete"
         matches!(
             key,
             // Only include truly inferred values
-            "port" | "connection_string" | "local_address" | "inferred_port" | "password"
+            "port"
+                | "connection_string"
+                | "local_address"
+                | "inferred_port"
+                | "password"
+                | "root_password"
         )
     }
 
@@ -6951,6 +7037,31 @@ echo "[restore] Pre-seed complete"
             // Local node
             let service_instance =
                 self.create_service_instance(service.name.clone(), service_type_enum);
+
+            if service_type_enum == ServiceType::Mariadb {
+                let parameters = self.get_service_parameters(service_id).await?;
+                if parameters.contains_key("container_name") {
+                    let service_config = ServiceConfig {
+                        name: service.name.clone(),
+                        service_type: service_type_enum,
+                        version: service.version.clone(),
+                        parameters: serde_json::to_value(parameters).map_err(|e| {
+                            ExternalServiceError::InternalError {
+                                reason: format!("Failed to serialize parameters: {}", e),
+                            }
+                        })?,
+                    };
+                    service_instance.init(service_config).await.map_err(|e| {
+                        ExternalServiceError::StopFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Failed to initialize imported MariaDB service before stop: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                }
+            }
 
             service_instance
                 .stop()
@@ -8106,7 +8217,9 @@ echo "[restore] Pre-seed complete"
 
             // Detect service type based on image name
             #[allow(deprecated)]
-            let service_type = if image.contains("postgres")
+            let service_type = if crate::mariadb_query::is_mariadb_compatible_image(&image) {
+                ServiceType::Mariadb
+            } else if image.contains("postgres")
                 || image.contains("timescaledb")
                 || image.contains("pgvector")
             {
@@ -8196,7 +8309,7 @@ echo "[restore] Pre-seed complete"
 
         for (key, value) in &request.parameters {
             match key.as_str() {
-                "username" | "password" => {
+                "username" | "password" | "database" | "root_password" => {
                     if let Some(str_value) = value.as_str() {
                         credentials.insert(key.clone(), str_value.to_string());
                     }
@@ -8212,6 +8325,17 @@ echo "[restore] Pre-seed complete"
         // Get the appropriate service instance and call import
         #[allow(deprecated)]
         let service_config = match request.service_type {
+            ServiceType::Mariadb => {
+                let mariadb = MariaDbService::new(request.name.clone(), Arc::clone(&self.docker));
+                mariadb
+                    .import_from_container(
+                        request.container_id.clone(),
+                        request.name.clone(),
+                        credentials,
+                        additional_config,
+                    )
+                    .await?
+            }
             ServiceType::Postgres => {
                 let postgres = PostgresService::new(request.name.clone(), Arc::clone(&self.docker));
                 postgres
