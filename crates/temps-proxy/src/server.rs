@@ -1,5 +1,6 @@
 use crate::config::*;
 use crate::proxy::LoadBalancer;
+use crate::service::cert_host_cache::CertHostCache;
 use crate::service::connection_filter_service::TcpConnectionFilter;
 use crate::service::lb_service::LbService;
 use crate::services::*;
@@ -233,6 +234,25 @@ pub fn setup_proxy_server(
 
     // Create service implementations
     let lb_service = Arc::new(LbService::new(db.clone()));
+
+    // Keep the custom-route snapshot in memory so `has_custom_route` and
+    // `has_route_for_host` never query Postgres on the request hot path (WS6-G).
+    // A dedicated thread owns the periodic 60-second refresh, which is the sole
+    // propagation mechanism for this instance: admin-API writes (create/update/
+    // delete) are handled by the separate console-owned LbService and never reach
+    // this object directly. Route changes become visible to real traffic within at
+    // most 60 seconds via the loop below.
+    {
+        let lb_refresher = lb_service.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for custom-route snapshot refresh");
+            rt.block_on(lb_refresher.run_refresh_loop());
+        });
+    }
+
     let upstream_resolver = Arc::new(UpstreamResolverImpl::new(
         Arc::new(proxy_config.clone()),
         lb_service,
@@ -251,8 +271,8 @@ pub fn setup_proxy_server(
     let proxy_log_storage =
         crate::storage::build_proxy_log_storage(&config, db.clone(), ip_service.clone());
 
-    // Create batch writer for proxy logs (bounded channel + background batch write)
-    let (proxy_log_handle, proxy_log_writer) =
+    // Create batch writer for proxy logs and tracking events (bounded channels + background tasks)
+    let (proxy_log_handle, tracking_handle, proxy_log_writer) =
         crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
             db.clone(),
             ip_service.clone(),
@@ -286,21 +306,28 @@ pub fn setup_proxy_server(
         });
     }
 
+    let cert_host_cache = Arc::new(CertHostCache::new(db.clone()));
+
+    // Keep the cert-host set in memory so the HTTP→HTTPS redirect check never
+    // queries Postgres on the request hot path (WS3). A dedicated thread owns the
+    // periodic refresh, mirroring the IP block-list loop above.
+    {
+        let cert_host_refresher = cert_host_cache.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for cert-host refresh");
+            rt.block_on(cert_host_refresher.run_refresh_loop());
+        });
+    }
+
     let challenge_service = Arc::new(crate::service::challenge_service::ChallengeService::new(
         db.clone(),
     ));
 
     let project_context_resolver = Arc::new(ProjectContextResolverImpl::new(route_table.clone()))
         as Arc<dyn ProjectContextResolver>;
-
-    let visitor_manager = Arc::new(VisitorManagerImpl::new(
-        db.clone(),
-        crypto.clone(),
-        ip_service.clone(),
-    )) as Arc<dyn VisitorManager>;
-
-    let session_manager =
-        Arc::new(SessionManagerImpl::new(db.clone(), crypto.clone())) as Arc<dyn SessionManager>;
 
     // Create path-keyed file store for static asset serving
     let cas_file_store: Arc<dyn temps_file_store::FileStore> = Arc::new(
@@ -311,14 +338,14 @@ pub fn setup_proxy_server(
     let mut lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
+        tracking_handle,
         project_context_resolver,
-        visitor_manager,
-        session_manager,
         crypto,
         db.clone(),
         config_service,
         ip_access_control_service,
         challenge_service,
+        cert_host_cache,
         proxy_config.disable_https_redirect,
     );
     if let Some(gate) = admin_gate {
@@ -351,14 +378,27 @@ pub fn setup_proxy_server(
         conf: None,       // No config file path
     };
 
-    let mut server = pingora_core::server::Server::new(Some(opt))?;
+    // Pingora's default ServerConf runs each service on a SINGLE worker thread,
+    // which caps the whole data plane at one core (~20k req/s) while the rest
+    // of the machine idles. Size the work-stealing runtime to the host, capped
+    // so the proxy doesn't starve the console/background services on big boxes.
+    let conf = pingora_core::server::configuration::ServerConf {
+        threads: std::thread::available_parallelism()
+            .map(|n| n.get().min(16))
+            .unwrap_or(4),
+        ..Default::default()
+    };
+    info!("Proxy data plane worker threads: {}", conf.threads);
+    let mut server = pingora_core::server::Server::new_with_opt_and_conf(Some(opt), conf);
     server.bootstrap();
 
     // Create HTTP proxy service using the builder (Pingora 0.8.0)
     // Limit downstream connection reuse to prevent slow memory leaks from long-lived
     // keep-alive connections. Equivalent to nginx's keepalive_requests directive.
+    // 8192 (vs 1024) keeps the leak bound while cutting connection-recycle churn
+    // 8x at high req/s (each recycle costs a client reconnect + a TIME_WAIT slot).
     let mut server_options = HttpServerOptions::default();
-    server_options.keepalive_request_limit = Some(1024);
+    server_options.keepalive_request_limit = Some(8192);
 
     let mut proxy_service = ProxyServiceBuilder::new(&server.configuration, lb)
         .name("Temps HTTP Proxy Service")
@@ -435,6 +475,20 @@ pub fn create_proxy_service(
 
     // Create service implementations
     let lb_service = Arc::new(LbService::new(db.clone()));
+
+    // Keep the custom-route snapshot in memory so `has_custom_route` and
+    // `has_route_for_host` never query Postgres on the request hot path (WS6-G).
+    {
+        let lb_refresher = lb_service.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for custom-route snapshot refresh");
+            rt.block_on(lb_refresher.run_refresh_loop());
+        });
+    }
+
     let upstream_resolver = Arc::new(UpstreamResolverImpl::new(
         Arc::new(proxy_config.clone()),
         lb_service,
@@ -453,8 +507,8 @@ pub fn create_proxy_service(
     let proxy_log_storage =
         crate::storage::build_proxy_log_storage(&config, db.clone(), ip_service.clone());
 
-    // Create batch writer for proxy logs (bounded channel + background batch write)
-    let (proxy_log_handle, proxy_log_writer) =
+    // Create batch writer for proxy logs and tracking events (bounded channels + background tasks)
+    let (proxy_log_handle, tracking_handle, proxy_log_writer) =
         crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
             db.clone(),
             ip_service.clone(),
@@ -488,6 +542,22 @@ pub fn create_proxy_service(
         });
     }
 
+    let cert_host_cache = Arc::new(CertHostCache::new(db.clone()));
+
+    // Keep the cert-host set in memory so the HTTP→HTTPS redirect check never
+    // queries Postgres on the request hot path (WS3). A dedicated thread owns the
+    // periodic refresh, mirroring the IP block-list loop above.
+    {
+        let cert_host_refresher = cert_host_cache.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime for cert-host refresh");
+            rt.block_on(cert_host_refresher.run_refresh_loop());
+        });
+    }
+
     let challenge_service = Arc::new(crate::service::challenge_service::ChallengeService::new(
         db.clone(),
     ));
@@ -495,27 +565,18 @@ pub fn create_proxy_service(
     let project_context_resolver = Arc::new(ProjectContextResolverImpl::new(route_table.clone()))
         as Arc<dyn ProjectContextResolver>;
 
-    let visitor_manager = Arc::new(VisitorManagerImpl::new(
-        db.clone(),
-        crypto.clone(),
-        ip_service.clone(),
-    )) as Arc<dyn VisitorManager>;
-
-    let session_manager =
-        Arc::new(SessionManagerImpl::new(db.clone(), crypto.clone())) as Arc<dyn SessionManager>;
-
     // Create the main load balancer
     let lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
+        tracking_handle,
         project_context_resolver,
-        visitor_manager,
-        session_manager,
         crypto,
         db,
         config_service,
         ip_access_control_service,
         challenge_service,
+        cert_host_cache,
         proxy_config.disable_https_redirect,
     );
 

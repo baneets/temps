@@ -11230,6 +11230,7 @@ dependencies = [
  "temps-webhooks",
  "temps-wireguard",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-util",
  "tower 0.5.3",
@@ -12549,6 +12550,7 @@ dependencies = [
  "lazy_static",
  "memchr",
  "mime_guess",
+ "moka",
  "once_cell",
  "openssl",
  "parking_lot",
@@ -12559,6 +12561,7 @@ dependencies = [
  "pingora-openssl",
  "pingora-proxy",
  "rand 0.8.6",
+ "rcgen 0.13.2",
  "regex",
  "rustls",
  "rustls-pemfile",
@@ -13139,6 +13142,26 @@ dependencies = [
  "lazy_static",
  "parking_lot",
  "rustc-hash 1.1.0",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a2825c78386b4ae0314074867860ba9577875de945f05992c38815cbec327f0"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "249f09e49ab1609436f34c776e84231bead18d6a955f119f939bdc1d847561bd"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]
