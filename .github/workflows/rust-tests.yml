@@ -194,7 +194,21 @@ jobs:
           bun run build
 
       - name: Build all test binaries
-        run: cargo test --no-run --workspace --all-features
+        # Must match the feature set every downstream job actually builds
+        # with, or their cache restore is a no-op: cargo fingerprints
+        # include enabled features, so `--all-features` here (previously)
+        # produced artifacts that fingerprint-mismatched the unit-tests/
+        # integration-tests jobs' plain `cargo test -p ...` invocations on
+        # every single dependency, forcing a full from-scratch rebuild of
+        # all ~500 crates despite a "full match" cache restore (see CI run
+        # 28878435864: 22m of a 27m unit-tests job was this rebuild, on a
+        # single core because of --jobs 1 below).
+        # `temps-providers/docker-tests` is the one extra feature actually
+        # used downstream (docker-providers/docker-backups/postgres-upgrades
+        # groups); it has zero optional deps (`docker-tests = []`) and the
+        # workspace uses resolver = "2", so enabling it here doesn't touch
+        # any other crate's fingerprint.
+        run: cargo test --no-run --workspace --features temps-providers/docker-tests
         env:
           CARGO_INCREMENTAL: 0
 
@@ -284,6 +298,22 @@ jobs:
           cd crates/temps-captcha-wasm
           bun run build
 
+      - name: Build unit test binaries
+        env:
+          CARGO_TERM_COLOR: never
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+        # Compile with the runner's full parallelism. `--jobs 1` (used in the
+        # run step below) throttles cargo's *build* concurrency exactly like
+        # it throttles test-binary execution concurrency -- there is no
+        # separate flag for one without the other -- so compiling here first
+        # keeps that restriction from serializing the whole dependency graph
+        # onto a single core. Same command as the run step below (minus
+        # --jobs/--test-threads), so as long as the restored cache matches
+        # (see build-tests' feature-flag comment above), this is a near-instant
+        # freshness check, not a rebuild.
+        run: cargo test --no-run --no-fail-fast --lib ${{ matrix.crates }}
+
       - name: Run unit tests
         env:
           CARGO_TERM_COLOR: never
@@ -297,7 +327,9 @@ jobs:
         # *each crate's* test binary as its own process and doesn't fully
         # serialize them by default, so separate crates' binaries were still
         # racing each other even with each individually single-threaded.
-        # `--jobs 1` forces cargo to run one test binary at a time too.
+        # `--jobs 1` forces cargo to run one test binary at a time too --
+        # everything is already built by the step above, so this only
+        # serializes execution, not compilation.
         # Matches the trade-off already made for the docker-backups/
         # postgres-upgrades integration-test groups: slower, but eliminates
         # cross-test DB contention instead of chasing it test-by-test.
@@ -384,8 +416,12 @@ jobs:
             # against a concurrently-running test in the same shared DB within
             # a couple of runs; with --jobs 1 --test-threads=1 the full
             # 18-crate suite ran clean.
+            # run_jobs (below) applies --jobs only to the run step, not the
+            # build step -- see the "Build integration test binaries" step
+            # for why that split matters.
+            run_jobs: "1"
             cargo_args: >-
-              test --no-fail-fast --jobs 1
+              test --no-fail-fast
               -p temps-deployments
               -p temps-backup
               -p temps-vulnerability-scanner
@@ -487,13 +523,25 @@ jobs:
           timeout 60 bash -c 'until docker exec timescaledb pg_isready -U test_user -d test_db; do sleep 1; done'
           echo "TimescaleDB is ready"
 
+      - name: Build integration test binaries
+        env:
+          CARGO_TERM_COLOR: never
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+        # Full runner parallelism, same reasoning as unit-tests' build step:
+        # docker-deployments' run_jobs=1 (below) must not also throttle
+        # compilation. The other three groups here don't set run_jobs, so
+        # this step is pure upside for them too -- same command run twice,
+        # cargo just confirms it's already built.
+        run: cargo ${{ matrix.cargo_args }} --no-run
+
       - name: Run integration tests
         env:
           CARGO_TERM_COLOR: never
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           TEMPS_TEST_DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
-        run: cargo ${{ matrix.cargo_args }} -- ${{ matrix.test_args }}
+        run: cargo ${{ matrix.cargo_args }} ${{ matrix.run_jobs && format('--jobs {0}', matrix.run_jobs) || '' }} -- ${{ matrix.test_args }}
   # ---------------------------------------------------------------------------
   # Phase 2b: MariaDB PITR full-chain E2E
   # ---------------------------------------------------------------------------
