@@ -67,6 +67,16 @@ jobs:
       #   separately, not a drop-in version bump.
       # - RUSTSEC-2018-0017 (tempdir): transitive via nixpacks, no newer
       #   nixpacks release drops it yet.
+      # - RUSTSEC-2025-0069 (daemonize): transitive via pingora-core; no
+      #   current pingora release drops it yet.
+      # - RUSTSEC-2024-0388 (derivative): transitive via pingora-core and
+      #   pingora-load-balancing; no current pingora release drops it yet.
+      # - RUSTSEC-2025-0121 (gcc): transitive only; no direct use in Temps.
+      # - RUSTSEC-2025-0119 (number_prefix): transitive via indicatif.
+      # - RUSTSEC-2024-0436 (paste): transitive via proc-macro dependencies
+      #   used by networking/analytics/image crates.
+      # - RUSTSEC-2026-0173 (proc-macro-error2): transitive via pingora's
+      #   tracing stack and sea-orm macros.
       #
       # The three below are real vulnerabilities (not just "unmaintained"
       # notices), blocked on upstream fixes with no non-forking workaround.
@@ -95,7 +105,7 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2024-0370,RUSTSEC-2025-0134,RUSTSEC-2018-0017,RUSTSEC-2024-0437,RUSTSEC-2023-0018,RUSTSEC-2023-0071
+          ignore: RUSTSEC-2024-0370,RUSTSEC-2025-0134,RUSTSEC-2018-0017,RUSTSEC-2025-0069,RUSTSEC-2024-0388,RUSTSEC-2025-0121,RUSTSEC-2025-0119,RUSTSEC-2024-0436,RUSTSEC-2026-0173,RUSTSEC-2024-0437,RUSTSEC-2023-0018,RUSTSEC-2023-0071
 
   web-audit:
     name: Web Dependency Audit (bun audit)
