@@ -5,21 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-beta.43] - 2026-07-10
 
 ### Added
 
-- **Proxy metrics, dashboard and default alerts**: The Pingora proxy now records per-request metrics in lock-free atomic counters (status classes 1xx–5xx plus a fixed duration-bucket histogram in `temps-proxy/src/metrics.rs`) — a few relaxed atomic adds per request, no locks or I/O on the hot path, constant memory at any request rate. Recording happens once per request in the Pingora `logging()` end-of-request hook, so short-circuited responses (redirects, password walls, ACME challenges, admin-gate denials) are counted too. A background `ProxyMetricsSampler` flushes interval deltas every `monitoring.scrape_interval_secs` to the metrics store (ClickHouse or TimescaleDB, same backend selection as the console) as `SourceKind::Node` points for the control-plane node (`proxy.requests`, `proxy.requests_2xx/3xx/4xx/5xx`, `proxy.requests_project/console/other` (destination split: project route vs console fallback vs proxy-handled — always sums to `proxy.requests`), `proxy.error_rate_percent`, `proxy.request_duration_avg_ms/p50/p95/p99`, and a backend-vs-proxy latency split for proxied requests — `proxy.upstream_duration_*` (upstream connect + processing + TTFB) and `proxy.self_duration_*` (total minus backend, the proxy's own overhead)), readable via the existing `GET /nodes/{id}/metrics` endpoint in both single-process and split proxy/console (ADR-017) topologies. A new "Proxy" page in the web console charts traffic, error rate, and latency percentiles. Migration `m20260708_000001_add_node_id_to_monitoring_alert_rules` adds `node_id` as a third alert-rule target so the `AlertEvaluator` can watch node-scoped metrics; default proxy rules are seeded at startup (error rate >20%, p99 >5s — one rule per metric, matching the (target, metric_name) unique-index semantics).
+- **analytics-sdk:** Exclude sensitive paths from session replay by default
+- **auth:** Audit concurrent sessions and allow requiring MFA for admins ([#189](https://github.com/gotempsh/temps/issues/189))
+- **deployments:** Add generic DeploymentGate extension point ([#229](https://github.com/gotempsh/temps/issues/229))
+- **providers:** Add managed S3 backend protocol + minIO support ([#144](https://github.com/gotempsh/temps/issues/144))
+- **auth:** Add platform-admin role, key/token rotation, and MCP kill-switch ([#191](https://github.com/gotempsh/temps/issues/191))
+- **deployments:** Add SecretsManagerResolver OSS extension seam (ADR 0009 §1-2) ([#252](https://github.com/gotempsh/temps/issues/252))
+- **proxy:** Hot-path metrics with node dashboard and default alerts ([#258](https://github.com/gotempsh/temps/issues/258))
+- **auth:** Add ProjectAccessChecker trait and project_access_guard! macro (ADR 028 Phase A) ([#260](https://github.com/gotempsh/temps/issues/260))
+- **ai-chat:** Allow AI write tool to provision and link external services ([#256](https://github.com/gotempsh/temps/issues/256))
+- **auth:** Wire project_access_guard! into all project-scoped handlers (ADR 028 Phase B) ([#261](https://github.com/gotempsh/temps/issues/261))
+- **ai-tools:** Expose deployment and node metrics to AI read allowlist ([#265](https://github.com/gotempsh/temps/issues/265))
+- **auth:** Project-scoped permission narrowing (project_permission_guard!) ([#268](https://github.com/gotempsh/temps/issues/268))
+
+### CI
+
+- Add dependency and container scanning for Temps' own supply chain ([#187](https://github.com/gotempsh/temps/issues/187))
+- Auto-merge dependabot patch/minor PRs once CI passes ([#228](https://github.com/gotempsh/temps/issues/228))
+- Reduce rust-cache eviction churn and stop starving PRs of it ([#248](https://github.com/gotempsh/temps/issues/248))
+- Fix unit-tests build taking 22m+ due to feature-flag cache mismatch
+- Build test binaries once via cargo-nextest, share across all jobs ([#253](https://github.com/gotempsh/temps/issues/253))
+
+### Documentation
+
+- Forbid environment variables for runtime configuration
+- Require new features to scale on small resources ([#257](https://github.com/gotempsh/temps/issues/257))
+- **adr:** Project-scoped RBAC enforcement (ADR 028) ([#259](https://github.com/gotempsh/temps/issues/259))
 
 ### Fixed
 
-- **Crypto dependency alignment**: Move direct `hmac` users and workspace `hkdf` onto digest-0.11-compatible releases so the merged `sha2` 0.11 dependency update continues to compile instead of requiring a rollback.
-- **Deployment token routes**: Mount `deployment_tokens::configure_routes()` and merge `DeploymentTokensApiDoc` in `DeploymentsPlugin` so deployment-token API paths are reachable at runtime and visible in the generated OpenAPI schema.
+- **ci:** Make rust-tests reliably fail on test failures
+- **providers:** Bind provisioned service ports to 127.0.0.1 instead of 0.0.0.0 ([#190](https://github.com/gotempsh/temps/issues/190))
+- **ci:** Serialize docker-deployments integration tests to stop Postgres deadlocks ([#195](https://github.com/gotempsh/temps/issues/195))
+- **test-utils:** Disable TimescaleDB background workers in TestDatabase ([#196](https://github.com/gotempsh/temps/issues/196))
+- **ci:** Disable TimescaleDB background workers in integration-tests services container ([#197](https://github.com/gotempsh/temps/issues/197))
+- **web:** Resolve gitlab vs github commit links and trace UI polish ([#231](https://github.com/gotempsh/temps/issues/231))
+- **web:** Add web TypeScript check to CI and fix all errors ([#233](https://github.com/gotempsh/temps/issues/233))
+- Resolve stacked dependency-bump compilation breaks on main ([#247](https://github.com/gotempsh/temps/issues/247))
+- Repair rcgen 0.14 API breaks on main ([#250](https://github.com/gotempsh/temps/issues/250))
+- **providers:** Persist actual bound port after container creation retry ([#254](https://github.com/gotempsh/temps/issues/254))
+- **auth:** Enforce privilege ceiling on custom API key permissions ([#267](https://github.com/gotempsh/temps/issues/267))
+- **analytics:** Resolve visitor_id on lookup miss instead of dropping it ([#269](https://github.com/gotempsh/temps/issues/269))
 
-### Tests
+### Miscellaneous
 
-- **MinIO restore coverage**: Extend `test_s3_backup_and_restore_to_s3` to create 100 MinIO buckets with synthetic files, back them up through the production S3 mirror path, restore into a second service, and verify all restored objects so managed S3 compatibility regressions are caught in the Docker backup suite.
-- **MinIO test container cleanup**: Keep the Docker test helper from sweeping active `temps-test-minio-*` containers created by the same test run, because multi-MinIO backup tests need source and destination containers alive at the same time.
+- **scripts:** Add local testcontainer orphan-cleanup script ([#246](https://github.com/gotempsh/temps/issues/246))
+
+### Performance
+
+- **proxy:** Remove per-request database dependencies from the hot path ([#230](https://github.com/gotempsh/temps/issues/230))
+- **otel:** Cache storage quota checks to cut ingest DB load ([#262](https://github.com/gotempsh/temps/issues/262))
+- **auth:** Throttle last_used_at writes on every authenticated request ([#264](https://github.com/gotempsh/temps/issues/264))
+- Bound proxy-log and monitor-health hypertable lookups by time ([#266](https://github.com/gotempsh/temps/issues/266))
+
+### Security
+
+- Gate unauthenticated admin endpoints + expand AI chat allowlist ([#249](https://github.com/gotempsh/temps/issues/249))
 
 ## [0.1.0-beta.42] - 2026-07-04
 
@@ -55,8 +100,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0-beta.40] - 2026-07-01
 
 ### Added
-- **Managed S3 backend driver contract**: `temps-providers` now defines a `ManagedS3Backend` protocol for RustFS-compatible and Garage-compatible object-storage lifecycle operations, keeping `rustfs` as the default while requiring `garage` to be managed by an out-of-process provider over `provider_socket` so AGPL storage engines are not compiled into the Temps binary.
-- **MinIO as an S3 backend option**: Managed `s3` services can now select `backend=minio` alongside the default `rustfs` and Garage backend selector, so operators can keep MinIO compatibility without creating a separate current service type.
 
 - **notifications:** Add Cloudflare Email Sending provider ([#160](https://github.com/gotempsh/temps/issues/160))
 - **otel:** ClickHouse-first OTEL metrics storage with full-fidelity decode
