@@ -357,10 +357,16 @@ impl TempsPlugin for OtelPlugin {
                     database = %ch_cfg.database,
                     "ClickHouse OTel backend enabled (ADR-016) — applying migrations"
                 );
+                // A plugin (e.g. one implementing per-project data retention
+                // policies) registers an alternative implementation; a
+                // plugin-free binary falls back to the fixed default.
+                let retention_resolver = context
+                    .get_service::<dyn temps_core::RetentionResolver>()
+                    .unwrap_or_else(|| Arc::new(temps_core::FixedRetentionResolver));
                 let ch_storage = Arc::new(ClickHouseOtelStorage::new(
                     ch_cfg.clone(),
                     timescale_storage,
-                    Arc::new(temps_core::FixedRetentionResolver),
+                    retention_resolver,
                 ));
                 // Run migrations in a background task so plugin init
                 // returns promptly. If migrations fail, the first

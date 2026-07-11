@@ -268,8 +268,12 @@ pub fn setup_proxy_server(
     // backend the API read handlers use so writes and reads agree. The
     // ClickHouse client lives only in this background task — never the Pingora
     // hot path.
-    let proxy_log_storage =
-        crate::storage::build_proxy_log_storage(&config, db.clone(), ip_service.clone());
+    let proxy_log_storage = crate::storage::build_proxy_log_storage(
+        &config,
+        db.clone(),
+        ip_service.clone(),
+        context.get_service::<dyn temps_core::RetentionResolver>(),
+    );
 
     // Create batch writer for proxy logs and tracking events (bounded channels + background tasks)
     let (proxy_log_handle, tracking_handle, proxy_log_writer) =
@@ -540,8 +544,12 @@ pub fn create_proxy_service(
     // backend the API read handlers use so writes and reads agree. The
     // ClickHouse client lives only in this background task — never the Pingora
     // hot path.
-    let proxy_log_storage =
-        crate::storage::build_proxy_log_storage(&config, db.clone(), ip_service.clone());
+    let proxy_log_storage = crate::storage::build_proxy_log_storage(
+        &config,
+        db.clone(),
+        ip_service.clone(),
+        context.get_service::<dyn temps_core::RetentionResolver>(),
+    );
 
     // Create batch writer for proxy logs and tracking events (bounded channels + background tasks)
     let (proxy_log_handle, tracking_handle, proxy_log_writer) =

@@ -48,6 +48,12 @@ impl TempsPlugin for ProxyPlugin {
                 .get_service::<temps_config::ConfigService>()
                 .map(|cs| cs.get_server_config());
 
+            // A plugin (e.g. one implementing per-project data retention
+            // policies) registers an alternative implementation; a plugin-free
+            // binary falls back to the fixed default inside
+            // `build_proxy_log_storage`.
+            let retention_resolver = context.get_service::<dyn temps_core::RetentionResolver>();
+
             // Create LB service
             let lb_service = Arc::new(LbService::new(db.clone()));
 
@@ -56,9 +62,12 @@ impl TempsPlugin for ProxyPlugin {
             // When ClickHouse is NOT configured this resolves to the default
             // TimescaleDB path with no behaviour change.
             let proxy_log_storage = match server_config {
-                Some(config) => {
-                    crate::storage::build_proxy_log_storage(&config, db.clone(), ip_service.clone())
-                }
+                Some(config) => crate::storage::build_proxy_log_storage(
+                    &config,
+                    db.clone(),
+                    ip_service.clone(),
+                    retention_resolver,
+                ),
                 None => {
                     tracing::debug!(
                         "Proxy plugin: ConfigService unavailable; proxy logs use the \
