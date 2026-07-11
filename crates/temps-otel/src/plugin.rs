@@ -695,8 +695,15 @@ impl TempsPlugin for OtelPlugin {
             // retention) can actually be found.
             if let Some(slot) = self.retention_resolver_slot.get() {
                 if let Some(resolver) = context.get_service::<dyn temps_core::RetentionResolver>() {
-                    slot.set(resolver);
-                    debug!("otel: RetentionResolver wired in from a registered plugin");
+                    if slot.set(resolver) {
+                        debug!("otel: RetentionResolver wired in from a registered plugin");
+                    } else {
+                        tracing::warn!(
+                            "otel: RetentionResolver slot was already claimed; \
+                             this plugin's resolver was NOT installed. \
+                             Check plugin registration order."
+                        );
+                    }
                 }
             }
             Ok(())

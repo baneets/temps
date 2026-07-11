@@ -476,6 +476,15 @@ impl ServeCommand {
         // the proxy is a wholly separate bootstrap, so neither side can reach
         // the other's service registry — this slot is the one thing shared
         // across both.
+        //
+        // **Security guardrail — shared-slot pattern:** this cross-context
+        // sharing is permissible for `RetentionResolverSlot` only because its
+        // sole effect is a per-row metadata value (`retention_days`) with no
+        // bearing on request routing, authorization, or connection handling.
+        // Do NOT add new objects to this pattern without an explicit security
+        // review: any object that influences auth, TLS/cert issuance, IP
+        // blocklists, or rate limiting MUST NOT be shared across plugin
+        // contexts this way.
         let retention_resolver_slot = Arc::new(temps_core::RetentionResolverSlot::new_default());
 
         // Build the console params once; both roles consume them.

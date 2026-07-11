@@ -873,6 +873,21 @@ pub struct ConsoleApiParams {
     /// here via the console's plugin manager otherwise. Pre-registered into the
     /// service registry below (before any plugin's `register_services` runs) so
     /// `ProxyPlugin` uses this exact object rather than creating its own.
+    ///
+    /// **Security guardrail — shared-slot pattern:**
+    /// This is the only object that is deliberately pre-registered in the
+    /// console's service registry AND passed directly to `start_proxy_server` as
+    /// a constructor argument. That cross-context sharing is necessary here
+    /// because the Pingora proxy runs in a wholly separate plugin context and
+    /// cannot reach anything registered in the console's registry.
+    ///
+    /// This pattern MUST NOT be used for any object that affects the proxy's
+    /// security decisions (authentication, TLS/cert issuance, IP blocklists,
+    /// rate limiting, or routing). It is acceptable for `RetentionResolverSlot`
+    /// exclusively because its sole effect is a per-row metadata value
+    /// (`retention_days`) with no bearing on request routing, authorization, or
+    /// connection handling. Any future object shared this same way requires an
+    /// explicit security review before being added here.
     pub retention_resolver_slot: Arc<temps_core::RetentionResolverSlot>,
 }
 
