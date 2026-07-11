@@ -465,6 +465,19 @@ impl ServeCommand {
             );
         }
 
+        // Shared retention-resolver slot: constructed ONCE here (before either
+        // the console or the proxy bootstraps begin) so both see the same
+        // object. The console's ProxyPlugin looks this up via the service
+        // registry and swaps in a plugin-provided resolver once one registers;
+        // the proxy (started separately below, own isolated plugin context)
+        // gets a direct clone as a function parameter since it can never see
+        // anything registered in the console's registry. See ADR 0017
+        // follow-up: register_services runs in plugin-registration order and
+        // the proxy is a wholly separate bootstrap, so neither side can reach
+        // the other's service registry — this slot is the one thing shared
+        // across both.
+        let retention_resolver_slot = Arc::new(temps_core::RetentionResolverSlot::new_default());
+
         // Build the console params once; both roles consume them.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let params = console::ConsoleApiParams {
@@ -482,6 +495,7 @@ impl ServeCommand {
             extra_plugins,
             admin_gate_service: Some(admin_gate_service),
             admin_gate_handle: Some(admin_gate_handle.clone()),
+            retention_resolver_slot: retention_resolver_slot.clone(),
         };
 
         if self.role == ServeRole::Console {
@@ -572,6 +586,7 @@ impl ServeCommand {
             self.disable_https_redirect,
             on_demand_manager,
             Some(admin_gate_handle),
+            retention_resolver_slot as Arc<dyn temps_core::RetentionResolver>,
         )
     }
 }

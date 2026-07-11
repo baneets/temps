@@ -59,14 +59,16 @@ impl TempsPlugin for ProxyPlugin {
                 .get_service::<temps_config::ConfigService>()
                 .map(|cs| cs.get_server_config());
 
-            // Slot defaults to FixedRetentionResolver; a plugin (e.g. one
-            // implementing per-project data retention policies) is wired in
-            // later from `initialize_plugin_services` — see the
-            // `retention_resolver_slot` field doc for why a direct
-            // `get_service` call here would never find it (register_services
-            // runs in plugin-registration order and this plugin registers
-            // before any EE plugin gets a chance to register one).
-            let retention_slot = Arc::new(temps_core::RetentionResolverSlot::new_default());
+            // Pre-registered by the top-level `temps serve` orchestrator
+            // (commands/serve/mod.rs) BEFORE any plugin's `register_services`
+            // runs, specifically so this exact slot instance can also be
+            // handed directly to `start_proxy_server` — the live Pingora
+            // proxy builds its own isolated plugin context that can never see
+            // anything registered here. A plugin (e.g. one implementing
+            // per-project data retention policies) is wired in later from
+            // `initialize_plugin_services`, once every plugin (including a
+            // later-registered EE plugin) has finished registering.
+            let retention_slot = context.require_service::<temps_core::RetentionResolverSlot>();
             let _ = self.retention_resolver_slot.set(retention_slot.clone());
 
             // Create LB service
@@ -81,7 +83,7 @@ impl TempsPlugin for ProxyPlugin {
                     &config,
                     db.clone(),
                     ip_service.clone(),
-                    Some(retention_slot as Arc<dyn temps_core::RetentionResolver>),
+                    retention_slot as Arc<dyn temps_core::RetentionResolver>,
                 ),
                 None => {
                     tracing::debug!(
@@ -222,6 +224,11 @@ mod tests {
             geo_ip_service,
         ));
         context.register_service(ip_service);
+
+        // Pre-registered by the top-level `temps serve` orchestrator in real
+        // boot (commands/serve/mod.rs), before any plugin's register_services
+        // runs — see the `retention_resolver_slot` field doc.
+        context.register_service(Arc::new(temps_core::RetentionResolverSlot::new_default()));
 
         // No ConfigService is registered here: the plugin reads it via
         // `get_service` and, when absent, selects the default TimescaleDB

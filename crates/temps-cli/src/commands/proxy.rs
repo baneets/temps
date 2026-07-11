@@ -507,6 +507,9 @@ impl ProxyCommand {
             config.clone(),
             on_demand_manager, // wired in split mode (ADR-017 Phase 2); None if Docker unavailable
             admin_gate_handle,
+            // This standalone `temps proxy` process never loads EE plugins —
+            // there is no console here to register an alternative resolver.
+            Arc::new(temps_core::FixedRetentionResolver),
         ) {
             Ok(_) => {
                 info!("Proxy server exited");
