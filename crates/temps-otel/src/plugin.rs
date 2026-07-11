@@ -360,6 +360,7 @@ impl TempsPlugin for OtelPlugin {
                 let ch_storage = Arc::new(ClickHouseOtelStorage::new(
                     ch_cfg.clone(),
                     timescale_storage,
+                    Arc::new(temps_core::FixedRetentionResolver),
                 ));
                 // Run migrations in a background task so plugin init
                 // returns promptly. If migrations fail, the first

@@ -202,7 +202,7 @@ pub fn build_proxy_log_storage(
             config.clickhouse_user.clone().unwrap_or_default(),
             config.clickhouse_password.clone().unwrap_or_default(),
         );
-        let store = ClickHouseProxyLogStore::new(cfg);
+        let store = ClickHouseProxyLogStore::new(cfg, Arc::new(temps_core::FixedRetentionResolver));
 
         // Apply migrations off the startup path. Cloning the client is cheap
         // (Arc-backed internally).
