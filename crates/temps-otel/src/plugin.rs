@@ -270,11 +270,23 @@ pub struct OtelApiDoc;
 // ── Plugin ──────────────────────────────────────────────────────────
 
 /// OTel Plugin for Temps.
-pub struct OtelPlugin;
+pub struct OtelPlugin {
+    /// Handle to the ClickHouse storage's `RetentionResolver` slot, captured
+    /// in `register_services` (before the storage is moved into `Arc<dyn
+    /// OtelStorage>`) and written into from `initialize_plugin_services`,
+    /// which runs only after every plugin has registered its services.
+    /// `register_services` runs in plugin-registration order and this plugin
+    /// registers before any later-registered plugin (e.g. one implementing
+    /// per-project retention) gets a chance to provide a resolver — same
+    /// two-phase handoff `DeploymentsPlugin` uses for `DeploymentGate`.
+    retention_resolver_slot: tokio::sync::OnceCell<Arc<temps_core::RetentionResolverSlot>>,
+}
 
 impl OtelPlugin {
     pub fn new() -> Self {
-        Self
+        Self {
+            retention_resolver_slot: tokio::sync::OnceCell::new(),
+        }
     }
 }
 
@@ -357,16 +369,17 @@ impl TempsPlugin for OtelPlugin {
                     database = %ch_cfg.database,
                     "ClickHouse OTel backend enabled (ADR-016) — applying migrations"
                 );
-                // A plugin (e.g. one implementing per-project data retention
-                // policies) registers an alternative implementation; a
-                // plugin-free binary falls back to the fixed default.
-                let retention_resolver = context
-                    .get_service::<dyn temps_core::RetentionResolver>()
-                    .unwrap_or_else(|| Arc::new(temps_core::FixedRetentionResolver));
+                // Slot defaults to FixedRetentionResolver; a plugin (e.g. one
+                // implementing per-project data retention policies) is wired
+                // in later from `initialize_plugin_services` — see the
+                // `retention_resolver_slot` field doc for why a direct
+                // `get_service` call here would never find it.
+                let retention_slot = Arc::new(temps_core::RetentionResolverSlot::new_default());
+                let _ = self.retention_resolver_slot.set(retention_slot.clone());
                 let ch_storage = Arc::new(ClickHouseOtelStorage::new(
                     ch_cfg.clone(),
                     timescale_storage,
-                    retention_resolver,
+                    retention_slot as Arc<dyn temps_core::RetentionResolver>,
                 ));
                 // Run migrations in a background task so plugin init
                 // returns promptly. If migrations fail, the first
@@ -671,6 +684,25 @@ impl TempsPlugin for OtelPlugin {
         })
     }
 
+    fn initialize_plugin_services<'a>(
+        &'a self,
+        context: &'a PluginContext,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Runs after every plugin has registered its services, so this is
+            // the first point at which an optional plugin-provided
+            // RetentionResolver (e.g. from a plugin implementing per-project
+            // retention) can actually be found.
+            if let Some(slot) = self.retention_resolver_slot.get() {
+                if let Some(resolver) = context.get_service::<dyn temps_core::RetentionResolver>() {
+                    slot.set(resolver);
+                    debug!("otel: RetentionResolver wired in from a registered plugin");
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let app_state_arc = context.require_service::<OtelAppState>();
         let mut app_state: OtelAppState = app_state_arc.as_ref().clone();
@@ -741,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_otel_plugin_default() {
-        let plugin = OtelPlugin;
+        let plugin = OtelPlugin::default();
         assert_eq!(plugin.name(), "otel");
     }
 

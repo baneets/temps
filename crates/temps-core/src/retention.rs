@@ -12,6 +12,14 @@
 //! Any expensive lookup (Postgres, external service) must be driven by a
 //! background refresh task in the implementing type; the result must be cached
 //! so that individual `resolve` calls do no I/O.
+//!
+//! [`RetentionResolverSlot`] exists because `register_services` runs in
+//! plugin-registration order: the ClickHouse storage backends are constructed
+//! (and their resolver captured) before a later-registered plugin gets a
+//! chance to provide one (see `OtelPlugin`/`ProxyPlugin` in their respective
+//! crates — the same two-phase handoff `DeploymentGate` uses via
+//! `deployment_gate_slot`, adapted to a lock-free `ArcSwap` since `resolve`
+//! must stay synchronous).
 
 /// Which ClickHouse table a retention-days resolution is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,6 +84,38 @@ impl RetentionResolver for FixedRetentionResolver {
     }
 }
 
+/// Deferred-registration handle for a [`RetentionResolver`].
+///
+/// Constructed with [`FixedRetentionResolver`] loaded by default and handed
+/// to a storage backend immediately at construction time (as
+/// `Arc<dyn RetentionResolver>`, via unsized coercion — this type itself
+/// implements the trait). Once every plugin has finished `register_services`,
+/// whichever plugin owns the slot calls [`Self::set`] from
+/// `initialize_plugin_services` if a plugin registered an alternative
+/// resolver — see the module-level note for why this indirection exists.
+/// `resolve` reads are lock-free (`ArcSwap::load`).
+pub struct RetentionResolverSlot(arc_swap::ArcSwap<std::sync::Arc<dyn RetentionResolver>>);
+
+impl RetentionResolverSlot {
+    /// Start with [`FixedRetentionResolver`] loaded.
+    pub fn new_default() -> Self {
+        Self(arc_swap::ArcSwap::new(std::sync::Arc::new(
+            std::sync::Arc::new(FixedRetentionResolver) as std::sync::Arc<dyn RetentionResolver>,
+        )))
+    }
+
+    /// Swap in a resolver provided by a licensed plugin.
+    pub fn set(&self, resolver: std::sync::Arc<dyn RetentionResolver>) {
+        self.0.store(std::sync::Arc::new(resolver));
+    }
+}
+
+impl RetentionResolver for RetentionResolverSlot {
+    fn resolve(&self, project_id: i32, table: RetentionTable) -> u16 {
+        self.0.load().resolve(project_id, table)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +134,27 @@ mod tests {
     fn retention_table_default_days() {
         assert_eq!(RetentionTable::Spans.default_days(), 90);
         assert_eq!(RetentionTable::ProxyLogs.default_days(), 30);
+    }
+
+    struct AlwaysSeven;
+    impl RetentionResolver for AlwaysSeven {
+        fn resolve(&self, _project_id: i32, _table: RetentionTable) -> u16 {
+            7
+        }
+    }
+
+    #[test]
+    fn slot_defaults_to_fixed_resolver() {
+        let slot = RetentionResolverSlot::new_default();
+        assert_eq!(slot.resolve(1, RetentionTable::Spans), 90);
+        assert_eq!(slot.resolve(1, RetentionTable::ProxyLogs), 30);
+    }
+
+    #[test]
+    fn slot_set_overrides_the_default() {
+        let slot = RetentionResolverSlot::new_default();
+        slot.set(std::sync::Arc::new(AlwaysSeven));
+        assert_eq!(slot.resolve(1, RetentionTable::Spans), 7);
+        assert_eq!(slot.resolve(1, RetentionTable::ProxyLogs), 7);
     }
 }
