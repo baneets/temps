@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.45] - 2026-07-11
+
+### Added
+
+- **web:** Add Let's Encrypt contact email to Settings page ([#273](https://github.com/gotempsh/temps/issues/273))
+- **dns:** Add Pebble challtestsrv-backed DNS provider for local testing ([#275](https://github.com/gotempsh/temps/issues/275))
+
+### CI
+
+- **release:** Cut macOS/web build time in release pipeline ([#271](https://github.com/gotempsh/temps/issues/271))
+
+### Fixed
+
+- **proxy:** Isolate preview connection-pool by sandbox target ([#274](https://github.com/gotempsh/temps/issues/274))
+- **proxy:** Track real body bytes for request/response bandwidth ([#276](https://github.com/gotempsh/temps/issues/276))
+
 ## [0.1.0-beta.44] - 2026-07-10
 
 ### Fixed
