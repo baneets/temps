@@ -229,9 +229,9 @@ pub fn setup_proxy_server(
     admin_gate: Option<temps_core::admin_gate::AdminGateHandle>,
     // Passed in directly rather than looked up via `context.get_service`:
     // `setup_proxy_plugins` below only ever registers ConfigPlugin+GeoPlugin,
-    // so a plugin-registered resolver (e.g. from an EE retention-policy
-    // plugin) would never be visible through that isolated context. The
-    // caller (single-binary `temps serve`) passes the same
+    // so a plugin-registered resolver (e.g. from a plugin implementing
+    // per-project retention policies) would never be visible through that
+    // isolated context. The caller (single-binary `temps serve`) passes the same
     // `RetentionResolverSlot` the console's `ProxyPlugin` uses; the
     // standalone `temps proxy` binary (no console, ever) passes a fixed
     // default.

@@ -67,7 +67,7 @@ impl TempsPlugin for ProxyPlugin {
             // anything registered here. A plugin (e.g. one implementing
             // per-project data retention policies) is wired in later from
             // `initialize_plugin_services`, once every plugin (including a
-            // later-registered EE plugin) has finished registering.
+            // later-registered plugin) has finished registering.
             let retention_slot = context.require_service::<temps_core::RetentionResolverSlot>();
             let _ = self.retention_resolver_slot.set(retention_slot.clone());
 

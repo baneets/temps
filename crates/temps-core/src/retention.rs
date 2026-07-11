@@ -99,7 +99,7 @@ impl RetentionResolver for FixedRetentionResolver {
 /// effect. A second caller cannot silently overwrite a resolver that was
 /// already installed — the call is a no-op and returns `false`. This
 /// prevents a buggy or late-registered plugin from replacing a correctly
-/// wired EE-provided resolver after the fact.
+/// wired resolver after the fact.
 pub struct RetentionResolverSlot {
     resolver: arc_swap::ArcSwap<std::sync::Arc<dyn RetentionResolver>>,
     /// Flipped to `true` by the first successful [`Self::set`] call.
@@ -118,7 +118,7 @@ impl RetentionResolverSlot {
         }
     }
 
-    /// Swap in a resolver provided by a licensed plugin, but only once.
+    /// Swap in a resolver provided by a plugin, but only once.
     ///
     /// A resolver that has already been set (by a prior `set()` call) cannot
     /// be silently overwritten by a second plugin. Returns `true` if the swap
