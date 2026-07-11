@@ -621,19 +621,27 @@ impl PerformanceService {
         deployment_id: Option<i32>,
         group_by: GroupBy,
     ) -> Result<GroupedPageMetricsResponse, PerformanceError> {
-        // Determine the grouping field and column
+        // Determine the grouping field and column. All dimensions except
+        // country live directly on performance_metrics; country needs the
+        // ip_geolocations join via pm.ip_address_id.
         let (group_field, group_by_name) = match group_by {
-            GroupBy::Path => ("rl.request_path", "path"),
+            GroupBy::Path => ("COALESCE(pm.pathname, 'Unknown')", "path"),
             GroupBy::Country => ("COALESCE(ig.country, 'Unknown')", "country"),
             GroupBy::DeviceType => (
-                "CASE WHEN rl.is_mobile = true THEN 'Mobile' ELSE 'Desktop' END",
+                // device_type stores woothee categories ("pc", "smartphone", ...)
+                "CASE WHEN pm.device_type IN ('smartphone', 'mobilephone') THEN 'Mobile' WHEN pm.device_type = 'pc' THEN 'Desktop' ELSE 'Unknown' END",
                 "device_type",
             ),
-            GroupBy::Browser => ("COALESCE(rl.browser, 'Unknown')", "browser"),
+            GroupBy::Browser => ("COALESCE(pm.browser, 'Unknown')", "browser"),
             GroupBy::OperatingSystem => (
-                "COALESCE(rl.operating_system, 'Unknown')",
+                "COALESCE(pm.operating_system, 'Unknown')",
                 "operating_system",
             ),
+        };
+        let geo_join = if matches!(group_by, GroupBy::Country) {
+            "LEFT JOIN ip_geolocations ig ON pm.ip_address_id = ig.id"
+        } else {
+            ""
         };
 
         // Build the base query with proper grouping
@@ -660,27 +668,20 @@ impl PerformanceService {
             params.push(dep_id.into());
         }
 
-        // Note: proxy_logs doesn't have is_static_file field
-        // Removed static file filter as it's not available in proxy_logs
-
-        // Optimized query using TimescaleDB features with flexible grouping
+        // AVG() over real columns returns double precision in Postgres, so
+        // every aggregate is cast to ::float8 and decoded as f64.
         let query = format!(
             r#"
             SELECT
                 {} as group_key,
-                AVG(pm.lcp) as lcp,
-                AVG(pm.cls) as cls,
-                AVG(pm.inp) as inp,
-                AVG(pm.fcp) as fcp,
-                AVG(pm.ttfb) as ttfb,
+                AVG(pm.lcp)::float8 as lcp,
+                AVG(pm.cls)::float8 as cls,
+                AVG(pm.inp)::float8 as inp,
+                AVG(pm.fcp)::float8 as fcp,
+                AVG(pm.ttfb)::float8 as ttfb,
                 COUNT(*) as events
             FROM performance_metrics pm
-            LEFT JOIN proxy_logs pl ON (
-                pm.project_id = pl.project_id AND
-                pm.session_id = pl.session_id AND
-                ABS(EXTRACT(EPOCH FROM (pm.recorded_at - pl.timestamp))) <= 300
-            )
-            LEFT JOIN ip_geolocations ig ON pl.client_ip = ig.ip_address
+            {}
             WHERE {}
             GROUP BY {}
             HAVING COUNT(*) >= 1
@@ -688,6 +689,7 @@ impl PerformanceService {
             LIMIT 100
             "#,
             group_field,
+            geo_join,
             where_conditions.join(" AND "),
             group_field
         );
@@ -698,11 +700,11 @@ impl PerformanceService {
         #[derive(FromQueryResult)]
         struct GroupedMetricResult {
             group_key: Option<String>,
-            lcp: Option<f32>,
-            cls: Option<f32>,
-            inp: Option<f32>,
-            fcp: Option<f32>,
-            ttfb: Option<f32>,
+            lcp: Option<f64>,
+            cls: Option<f64>,
+            inp: Option<f64>,
+            fcp: Option<f64>,
+            ttfb: Option<f64>,
             events: i64,
         }
 
@@ -725,11 +727,11 @@ impl PerformanceService {
             .filter_map(|r| {
                 r.group_key.map(|key| GroupedPageMetric {
                     group_key: key,
-                    lcp: r.lcp,
-                    cls: r.cls,
-                    inp: r.inp,
-                    fcp: r.fcp,
-                    ttfb: r.ttfb,
+                    lcp: r.lcp.map(|v| v as f32),
+                    cls: r.cls.map(|v| v as f32),
+                    inp: r.inp.map(|v| v as f32),
+                    fcp: r.fcp.map(|v| v as f32),
+                    ttfb: r.ttfb.map(|v| v as f32),
                     events: r.events,
                 })
             })
