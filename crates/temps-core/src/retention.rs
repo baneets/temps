@@ -94,25 +94,58 @@ impl RetentionResolver for FixedRetentionResolver {
 /// `initialize_plugin_services` if a plugin registered an alternative
 /// resolver — see the module-level note for why this indirection exists.
 /// `resolve` reads are lock-free (`ArcSwap::load`).
-pub struct RetentionResolverSlot(arc_swap::ArcSwap<std::sync::Arc<dyn RetentionResolver>>);
+///
+/// **Write-once semantics:** only the first call to [`Self::set`] takes
+/// effect. A second caller cannot silently overwrite a resolver that was
+/// already installed — the call is a no-op and returns `false`. This
+/// prevents a buggy or late-registered plugin from replacing a correctly
+/// wired resolver after the fact.
+pub struct RetentionResolverSlot {
+    resolver: arc_swap::ArcSwap<std::sync::Arc<dyn RetentionResolver>>,
+    /// Flipped to `true` by the first successful [`Self::set`] call.
+    claimed: std::sync::atomic::AtomicBool,
+}
 
 impl RetentionResolverSlot {
     /// Start with [`FixedRetentionResolver`] loaded.
     pub fn new_default() -> Self {
-        Self(arc_swap::ArcSwap::new(std::sync::Arc::new(
-            std::sync::Arc::new(FixedRetentionResolver) as std::sync::Arc<dyn RetentionResolver>,
-        )))
+        Self {
+            resolver: arc_swap::ArcSwap::new(std::sync::Arc::new(std::sync::Arc::new(
+                FixedRetentionResolver,
+            )
+                as std::sync::Arc<dyn RetentionResolver>)),
+            claimed: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
-    /// Swap in a resolver provided by a licensed plugin.
-    pub fn set(&self, resolver: std::sync::Arc<dyn RetentionResolver>) {
-        self.0.store(std::sync::Arc::new(resolver));
+    /// Swap in a resolver provided by a plugin, but only once.
+    ///
+    /// A resolver that has already been set (by a prior `set()` call) cannot
+    /// be silently overwritten by a second plugin. Returns `true` if the swap
+    /// was applied, `false` if a resolver was already set and this call was a
+    /// no-op.
+    pub fn set(&self, resolver: std::sync::Arc<dyn RetentionResolver>) -> bool {
+        if self
+            .claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            self.resolver.store(std::sync::Arc::new(resolver));
+            true
+        } else {
+            false
+        }
     }
 }
 
 impl RetentionResolver for RetentionResolverSlot {
     fn resolve(&self, project_id: i32, table: RetentionTable) -> u16 {
-        self.0.load().resolve(project_id, table)
+        self.resolver.load().resolve(project_id, table)
     }
 }
 
@@ -153,8 +186,42 @@ mod tests {
     #[test]
     fn slot_set_overrides_the_default() {
         let slot = RetentionResolverSlot::new_default();
-        slot.set(std::sync::Arc::new(AlwaysSeven));
+        let swapped = slot.set(std::sync::Arc::new(AlwaysSeven));
+        assert!(swapped, "first set() must return true");
         assert_eq!(slot.resolve(1, RetentionTable::Spans), 7);
         assert_eq!(slot.resolve(1, RetentionTable::ProxyLogs), 7);
+    }
+
+    struct AlwaysForty;
+    impl RetentionResolver for AlwaysForty {
+        fn resolve(&self, _project_id: i32, _table: RetentionTable) -> u16 {
+            40
+        }
+    }
+
+    #[test]
+    fn slot_second_set_is_noop() {
+        let slot = RetentionResolverSlot::new_default();
+
+        // First set: succeeds and resolver is active.
+        let first = slot.set(std::sync::Arc::new(AlwaysSeven));
+        assert!(first, "first set() must return true");
+        assert_eq!(slot.resolve(1, RetentionTable::Spans), 7);
+
+        // Second set: must be a no-op — returns false, resolver unchanged.
+        let second = slot.set(std::sync::Arc::new(AlwaysForty));
+        assert!(!second, "second set() must return false (write-once)");
+
+        // The FIRST resolver is still active; AlwaysForty must not have taken effect.
+        assert_eq!(
+            slot.resolve(1, RetentionTable::Spans),
+            7,
+            "resolver must remain AlwaysSeven after rejected second set()"
+        );
+        assert_eq!(
+            slot.resolve(1, RetentionTable::ProxyLogs),
+            7,
+            "resolver must remain AlwaysSeven after rejected second set()"
+        );
     }
 }
