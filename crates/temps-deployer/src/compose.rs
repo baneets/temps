@@ -599,6 +599,14 @@ impl ComposeExecutor {
                 "extends can import privileged settings from another compose file; \
                  inline the service definition instead",
             )?;
+            self.reject_present(
+                service,
+                service_name,
+                "volumes_from",
+                "volumes_from can inherit volumes from arbitrary host containers \
+                 outside this deployment (e.g. other tenants' or Temps infrastructure \
+                 containers)",
+            )?;
             self.reject_host_namespace(service, service_name, "network_mode")?;
             self.reject_host_namespace(service, service_name, "pid")?;
             self.reject_host_namespace(service, service_name, "ipc")?;
@@ -739,6 +747,7 @@ impl ComposeExecutor {
         "security_opt",
         "group_add",
         "device_cgroup_rules",
+        "volumes_from",
     ];
 
     /// Reject `${...}` / `$(...)` interpolation appearing anywhere within a
@@ -958,10 +967,18 @@ impl ComposeExecutor {
         !source.contains('/') && !source.starts_with('.') && !source.is_empty()
     }
 
-    /// Whether a host path is dangerous: it interpolates, resolves to a
-    /// forbidden absolute host path, or escapes the compose project directory
-    /// via `..`. Paths are normalized lexically first so `../../etc` and
-    /// `/tmp/../etc` cannot bypass the absolute-path block.
+    /// Whether a host path is dangerous: it interpolates, is any absolute host
+    /// path, or escapes the compose project directory via `..`. Paths are
+    /// normalized lexically first so `../../etc` and `/tmp/../etc` cannot bypass
+    /// the block.
+    ///
+    /// Bind sources in user compose must be relative to the per-project working
+    /// directory (compose runs with `current_dir(project_dir)`). Absolute host
+    /// paths are rejected unconditionally — there is no allowed absolute prefix,
+    /// because a world-writable location like `/tmp` can hold other tenants'
+    /// project artifacts (`.env.temps`, encryption keys) when the data dir lives
+    /// under it, and shared host paths are exactly the escape this guard exists
+    /// to prevent.
     fn is_dangerous_host_path(source: &str) -> bool {
         if Self::contains_interpolation(source) {
             return true;
@@ -971,8 +988,8 @@ impl ComposeExecutor {
         if normalized == ".." || normalized.starts_with("../") {
             return true;
         }
-        // Absolute host path outside the permitted /tmp sandbox.
-        if normalized.starts_with('/') && !normalized.starts_with("/tmp/") {
+        // Any absolute host path.
+        if normalized.starts_with('/') {
             return true;
         }
         false
@@ -1158,6 +1175,7 @@ impl ComposeExecutor {
             "sysctls",
             "userns_mode",
             "volumes",
+            "volumes_from",
         ];
 
         for key in service.keys().filter_map(Self::yaml_key) {
@@ -1956,6 +1974,7 @@ services:
             "security_opt: ['apparmor:unconfined']",
             "sysctls: {net.ipv4.ip_forward: '1'}",
             "volumes: ['/:/host:rw']",
+            "volumes_from: ['container:temps-db']",
         ];
 
         for dangerous_override in dangerous_overrides {
@@ -2468,7 +2487,14 @@ services:
         assert!(ComposeExecutor::is_dangerous_host_path("/tmp/../etc"));
         assert!(ComposeExecutor::is_dangerous_host_path("../escape"));
         assert!(!ComposeExecutor::is_dangerous_host_path("./data"));
-        assert!(!ComposeExecutor::is_dangerous_host_path("/tmp/ok"));
+        // All absolute host paths are rejected — including /tmp, which is
+        // world-writable and can hold other tenants' project artifacts.
+        assert!(ComposeExecutor::is_dangerous_host_path("/tmp/ok"));
+        assert!(ComposeExecutor::is_dangerous_host_path(
+            "/tmp/test/compose/victim"
+        ));
+        assert!(ComposeExecutor::is_dangerous_host_path("/etc/passwd"));
+        assert!(ComposeExecutor::is_dangerous_host_path("/"));
     }
 
     #[test]
@@ -2505,6 +2531,53 @@ services:
             .validate_compose_security_policy("compose file", userns)
             .unwrap_err();
         assert_eq!(violation_field(err), "userns_mode");
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_volumes_from() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // `volumes_from: container:X` inherits every volume of an arbitrary host
+        // container (other tenants', Temps infra) — a full host-escape vector.
+        let container_form =
+            "services:\n  pwn:\n    image: alpine\n    volumes_from:\n      - container:temps-db-1a2b3c\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", container_form)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "volumes_from");
+
+        // The `service:X` intra-project form is blocked too — the field is
+        // rejected outright rather than trying to distinguish safe targets.
+        let service_form =
+            "services:\n  pwn:\n    image: alpine\n    volumes_from:\n      - service:web\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", service_form)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "volumes_from");
+
+        // A benign service with no volumes_from still validates.
+        let clean = "services:\n  web:\n    image: alpine\n    volumes:\n      - ./data:/data\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", clean)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_absolute_tmp_bind() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // Absolute host bind sources are rejected even under /tmp, which is
+        // world-writable and can hold another project's data-dir artifacts.
+        let tmp_bind =
+            "services:\n  pwn:\n    image: alpine\n    volumes:\n      - /tmp/test/compose/victim:/stolen:ro\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", tmp_bind)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "volumes");
     }
 
     #[test]
