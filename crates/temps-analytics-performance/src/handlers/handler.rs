@@ -63,6 +63,9 @@ pub struct PerformanceMetricsQuery {
     deployment_id: Option<i32>,
     /// Device type filter: "desktop" or "mobile"
     device_type: Option<String>,
+    /// Include crawler/datacenter (bot) samples. Defaults to false — bots
+    /// are excluded from the read view but always stored at ingest.
+    include_bots: Option<bool>,
     /// Segment filters (filter_path, filter_country, filter_region,
     /// filter_city, filter_browser, filter_operating_system) — flattened so
     /// each remains a top-level query string param.
@@ -79,6 +82,8 @@ pub struct GroupedPageMetricsQuery {
     deployment_id: Option<i32>,
     /// Device type filter: "desktop" or "mobile"
     device_type: Option<String>,
+    /// Include crawler/datacenter (bot) samples. Defaults to false.
+    include_bots: Option<bool>,
     // "path", "country", "region", "city", "device_type", "browser", "operating_system"
     group_by: String,
     /// Segment filters — same shape as `PerformanceMetricsQuery`.
@@ -203,6 +208,7 @@ pub fn configure_public_routes() -> Router<Arc<AppState>> {
         ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
         ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)"),
         ("device_type" = Option<String>, Query, description = "Device type filter: desktop or mobile (optional)"),
+        ("include_bots" = Option<bool>, Query, description = "Include crawler/datacenter bot samples (default false)"),
         ("filter_path" = Option<String>, Query, description = "Filter to one page pathname (optional)"),
         ("filter_country" = Option<String>, Query, description = "Filter to one country (optional)"),
         ("filter_region" = Option<String>, Query, description = "Filter to one region (optional)"),
@@ -236,6 +242,7 @@ async fn get_performance_metrics(
             query.deployment_id,
             query.device_type,
             &query.segment,
+            query.include_bots.unwrap_or(false),
         )
         .await
     {
@@ -265,6 +272,7 @@ async fn get_performance_metrics(
         ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
         ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)"),
         ("device_type" = Option<String>, Query, description = "Device type filter: desktop or mobile (optional)"),
+        ("include_bots" = Option<bool>, Query, description = "Include crawler/datacenter bot samples (default false)"),
         ("filter_path" = Option<String>, Query, description = "Filter to one page pathname (optional)"),
         ("filter_country" = Option<String>, Query, description = "Filter to one country (optional)"),
         ("filter_region" = Option<String>, Query, description = "Filter to one region (optional)"),
@@ -298,6 +306,7 @@ async fn get_metrics_over_time(
             query.deployment_id,
             query.device_type,
             &query.segment,
+            query.include_bots.unwrap_or(false),
         )
         .await
     {
@@ -328,6 +337,7 @@ async fn get_metrics_over_time(
         ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)"),
         ("group_by" = String, Query, description = "Group by: path, country, region, city, device_type, browser, operating_system"),
         ("device_type" = Option<String>, Query, description = "Device type filter: desktop or mobile (optional)"),
+        ("include_bots" = Option<bool>, Query, description = "Include crawler/datacenter bot samples (default false)"),
         ("filter_path" = Option<String>, Query, description = "Filter to one page pathname (optional)"),
         ("filter_country" = Option<String>, Query, description = "Filter to one country (optional)"),
         ("filter_region" = Option<String>, Query, description = "Filter to one region (optional)"),
@@ -383,6 +393,7 @@ async fn get_grouped_page_metrics(
             query.deployment_id,
             query.device_type.clone(),
             &query.segment,
+            query.include_bots.unwrap_or(false),
             group_by,
         )
         .await

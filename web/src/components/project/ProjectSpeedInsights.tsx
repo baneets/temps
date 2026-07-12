@@ -325,6 +325,7 @@ interface SpeedBreakdownCardProps {
   startDate: string
   endDate: string
   device: 'desktop' | 'mobile'
+  includeBots: boolean
   filters: SpeedFilters
   onFilter: (key: keyof SpeedFilters, value: string) => void
 }
@@ -335,6 +336,7 @@ function SpeedBreakdownCard({
   startDate,
   endDate,
   device,
+  includeBots,
   filters,
   onFilter,
 }: SpeedBreakdownCardProps) {
@@ -348,6 +350,7 @@ function SpeedBreakdownCard({
         project_id: projectId,
         environment_id: environmentId!,
         device_type: device,
+        include_bots: includeBots,
         group_by: dimension,
         ...filters,
       },
@@ -478,6 +481,9 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
   const [timeRange, setTimeRange] = useState('7d')
   const [activeMetric, setActiveMetric] = useState<MetricKey>('lcp')
   const [filters, setFilters] = useState<SpeedFilters>({})
+  // Bots (crawler UAs + datacenter IPs) are always stored at ingest but
+  // hidden from this page by default — they report unrepresentative timings.
+  const [includeBots, setIncludeBots] = useState(false)
 
   const addFilter = (key: keyof SpeedFilters, value: string) =>
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -546,6 +552,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         project_id: project.id,
         environment_id: selectedEnvironment!,
         device_type: device,
+        include_bots: includeBots,
         ...filters,
       },
     }),
@@ -798,6 +805,19 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             </SelectContent>
           </Select>
 
+          <Select
+            value={includeBots ? 'all' : 'human'}
+            onValueChange={(v) => setIncludeBots(v === 'all')}
+          >
+            <SelectTrigger className="h-8 w-[130px] text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="human">Human traffic</SelectItem>
+              <SelectItem value="all">All traffic</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Button
             variant="outline"
             size="sm"
@@ -959,6 +979,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             startDate={startDate}
             endDate={endDate}
             device={device}
+            includeBots={includeBots}
             filters={filters}
             onCountryClick={(country) => addFilter('filter_country', country)}
           />
@@ -970,6 +991,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             startDate={startDate}
             endDate={endDate}
             device={device}
+            includeBots={includeBots}
             filters={filters}
             onFilter={addFilter}
           />
