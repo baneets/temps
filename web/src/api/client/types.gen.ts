@@ -7301,6 +7301,10 @@ export type GroupedPageMetricsQuery = SpeedSegmentFilters & {
     end_date: string;
     environment_id?: number | null;
     group_by: string;
+    /**
+     * Include crawler/datacenter (bot) samples. Defaults to false.
+     */
+    include_bots?: boolean | null;
     project_id: number;
     start_date: string;
 };
@@ -10540,6 +10544,11 @@ export type PerformanceMetricsQuery = SpeedSegmentFilters & {
     device_type?: string | null;
     end_date: string;
     environment_id?: number | null;
+    /**
+     * Include crawler/datacenter (bot) samples. Defaults to false — bots
+     * are excluded from the read view but always stored at ingest.
+     */
+    include_bots?: boolean | null;
     project_id: number;
     start_date: string;
 };
@@ -32276,6 +32285,10 @@ export type GetPerformanceMetricsData = {
          */
         device_type?: string;
         /**
+         * Include crawler/datacenter bot samples (default false)
+         */
+        include_bots?: boolean;
+        /**
          * Filter to one page pathname (optional)
          */
         filter_path?: string;
@@ -32361,6 +32374,10 @@ export type GetMetricsOverTimeData = {
          * Device type filter: desktop or mobile (optional)
          */
         device_type?: string;
+        /**
+         * Include crawler/datacenter bot samples (default false)
+         */
+        include_bots?: boolean;
         /**
          * Filter to one page pathname (optional)
          */
@@ -32451,6 +32468,10 @@ export type GetGroupedPageMetricsData = {
          * Device type filter: desktop or mobile (optional)
          */
         device_type?: string;
+        /**
+         * Include crawler/datacenter bot samples (default false)
+         */
+        include_bots?: boolean;
         /**
          * Filter to one page pathname (optional)
          */

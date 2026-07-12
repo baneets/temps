@@ -254,7 +254,16 @@ impl PerformanceService {
     /// Build the WHERE clause and params shared by the performance read
     /// queries. All columns are qualified with the `pm.` alias so the clause
     /// works with or without the `ip_geolocations ig` join; the returned bool
-    /// says whether that join is required (any geographic filter present).
+    /// says whether that join is required (any geographic filter present, or
+    /// bot exclusion — which checks `ig.is_hosting_provider`).
+    ///
+    /// Unless `include_bots` is set, samples are excluded when the UA parsed
+    /// as a crawler (`pm.is_crawler`) or the IP belongs to a hosting provider
+    /// (`ig.is_hosting_provider`) — headless browsers in datacenters report
+    /// wildly unrepresentative timings but carry normal Chrome user agents,
+    /// so the ASN signal is the one that actually catches them. Nothing is
+    /// dropped at ingest; this is purely a read-time view.
+    #[allow(clippy::too_many_arguments)]
     fn build_where(
         project_id: i32,
         start_date: UtcDateTime,
@@ -263,12 +272,17 @@ impl PerformanceService {
         deployment_id: Option<i32>,
         device_type: Option<String>,
         filters: &SpeedSegmentFilters,
+        include_bots: bool,
     ) -> (String, Vec<sea_orm::Value>, bool) {
         let mut conditions = vec![
             "pm.project_id = $1".to_string(),
             "pm.recorded_at >= $2".to_string(),
             "pm.recorded_at <= $3".to_string(),
         ];
+        if !include_bots {
+            conditions.push("pm.is_crawler = false".to_string());
+            conditions.push("COALESCE(ig.is_hosting_provider, false) = false".to_string());
+        }
         let mut params: Vec<sea_orm::Value> =
             vec![project_id.into(), start_date.into(), end_date.into()];
         let mut idx = 3;
@@ -312,7 +326,8 @@ impl PerformanceService {
         push_eq("ig.region", &filters.filter_region);
         push_eq("ig.city", &filters.filter_city);
 
-        (conditions.join(" AND "), params, filters.needs_geo_join())
+        let needs_geo_join = filters.needs_geo_join() || !include_bots;
+        (conditions.join(" AND "), params, needs_geo_join)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -325,6 +340,7 @@ impl PerformanceService {
         deployment_id: Option<i32>,
         device_type: Option<String>,
         filters: &SpeedSegmentFilters,
+        include_bots: bool,
     ) -> Result<PerformanceMetricsResponse, PerformanceError> {
         let (where_clause, params, needs_geo_join) = Self::build_where(
             project_id,
@@ -334,6 +350,7 @@ impl PerformanceService {
             deployment_id,
             device_type,
             filters,
+            include_bots,
         );
         let geo_join = if needs_geo_join {
             "LEFT JOIN ip_geolocations ig ON pm.ip_address_id = ig.id"
@@ -501,6 +518,7 @@ impl PerformanceService {
         deployment_id: Option<i32>,
         device_type: Option<String>,
         filters: &SpeedSegmentFilters,
+        include_bots: bool,
     ) -> Result<MetricsOverTimeResponse, PerformanceError> {
         let (where_clause, params, needs_geo_join) = Self::build_where(
             project_id,
@@ -510,6 +528,7 @@ impl PerformanceService {
             deployment_id,
             device_type,
             filters,
+            include_bots,
         );
         let geo_join = if needs_geo_join {
             "LEFT JOIN ip_geolocations ig ON pm.ip_address_id = ig.id"
@@ -718,6 +737,7 @@ impl PerformanceService {
         deployment_id: Option<i32>,
         device_type: Option<String>,
         filters: &SpeedSegmentFilters,
+        include_bots: bool,
         group_by: GroupBy,
     ) -> Result<GroupedPageMetricsResponse, PerformanceError> {
         // Determine the grouping field and column. Non-geographic dimensions
@@ -733,6 +753,7 @@ impl PerformanceService {
             deployment_id,
             device_type,
             filters,
+            include_bots,
         );
         let needs_geo_join = group_needs_geo || filters_need_geo;
         let geo_join = if needs_geo_join {
@@ -763,7 +784,7 @@ impl PerformanceService {
                 COUNT(*) as events
             FROM performance_metrics pm
             {}
-            WHERE {} AND pm.is_crawler = false
+            WHERE {}
             GROUP BY {}
             HAVING COUNT(*) >= 1
             ORDER BY events DESC, group_key
@@ -1110,6 +1131,7 @@ mod tests {
             None,
             Some("desktop".to_string()),
             &filters,
+            true, // include bots so no geo join is forced by bot exclusion
         );
         assert!(!needs_geo, "pm-only filters must not require the geo join");
         assert!(clause.contains("pm.pathname = $6"));
@@ -1130,10 +1152,43 @@ mod tests {
             None,
             None,
             &geo_filters,
+            true,
         );
         assert!(needs_geo, "geo filters must request the geo join");
         assert!(clause.contains("ig.country = $4"));
         assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_build_where_excludes_bots_by_default() {
+        use chrono::Utc;
+        let (clause, _, needs_geo) = PerformanceService::build_where(
+            1,
+            Utc::now(),
+            Utc::now(),
+            None,
+            None,
+            None,
+            &SpeedSegmentFilters::default(),
+            false,
+        );
+        assert!(clause.contains("pm.is_crawler = false"));
+        assert!(clause.contains("COALESCE(ig.is_hosting_provider, false) = false"));
+        assert!(needs_geo, "bot exclusion checks ig. and needs the geo join");
+
+        let (clause, _, needs_geo) = PerformanceService::build_where(
+            1,
+            Utc::now(),
+            Utc::now(),
+            None,
+            None,
+            None,
+            &SpeedSegmentFilters::default(),
+            true,
+        );
+        assert!(!clause.contains("is_crawler"));
+        assert!(!clause.contains("is_hosting_provider"));
+        assert!(!needs_geo);
     }
 
     #[test]

@@ -72,6 +72,7 @@ interface SpeedWorldMapProps {
   startDate: string
   endDate: string
   device: 'desktop' | 'mobile'
+  includeBots: boolean
   filters: Record<string, string | undefined>
   onCountryClick: (country: string) => void
 }
@@ -89,6 +90,7 @@ export function SpeedWorldMap({
   startDate,
   endDate,
   device,
+  includeBots,
   filters,
   onCountryClick,
 }: SpeedWorldMapProps) {
@@ -103,6 +105,7 @@ export function SpeedWorldMap({
         project_id: projectId,
         environment_id: environmentId!,
         device_type: device,
+        include_bots: includeBots,
         group_by: 'country',
         ...filters,
       },
