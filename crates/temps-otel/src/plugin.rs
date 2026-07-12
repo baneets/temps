@@ -8,7 +8,7 @@ use std::time::Duration;
 use temps_core::plugin::{
     PluginContext, PluginError, PluginRoutes, ServiceRegistrationContext, TempsPlugin,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use utoipa::openapi::OpenApi;
 use utoipa::OpenApi as OpenApiTrait;
 
@@ -51,8 +51,10 @@ pub struct OtelConfig {
     pub rate_limit_requests: u32,
     pub rate_limit_window_secs: u64,
 
-    // Quota
-    pub quota_bytes_per_project: u64,
+    // Quota. `None` (the default) disables per-project storage quotas
+    // entirely — ingest skips the quota check and its expensive per-project
+    // usage estimate. Set `TEMPS_OTEL_QUOTA_GB` to opt in.
+    pub quota_bytes_per_project: Option<u64>,
 
     // Background tasks
     pub enable_health_compute: bool,
@@ -72,7 +74,7 @@ impl Default for OtelConfig {
             retention_check_interval_secs: 3600, // 1 hour
             rate_limit_requests: 1000,
             rate_limit_window_secs: 60,
-            quota_bytes_per_project: 10 * 1024 * 1024 * 1024, // 10 GB
+            quota_bytes_per_project: None, // quota disabled unless configured
             enable_health_compute: true,
             enable_anomaly_detection: true,
         }
@@ -118,8 +120,16 @@ impl OtelConfig {
             }
         }
         if let Ok(v) = std::env::var("TEMPS_OTEL_QUOTA_GB") {
-            if let Ok(gb) = v.parse::<u64>() {
-                config.quota_bytes_per_project = gb * 1024 * 1024 * 1024;
+            match v.parse::<u64>() {
+                // 0 keeps quotas disabled, same as leaving the var unset.
+                Ok(gb) => {
+                    config.quota_bytes_per_project = (gb > 0).then(|| gb * 1024 * 1024 * 1024)
+                }
+                Err(_) => warn!(
+                    value = %v,
+                    "TEMPS_OTEL_QUOTA_GB is set but is not a non-negative integer; \
+                     storage quota stays disabled"
+                ),
             }
         }
         if let Ok(v) = std::env::var("TEMPS_OTEL_ENABLE_HEALTH_COMPUTE") {
@@ -790,7 +800,7 @@ mod tests {
         assert_eq!(config.retention_days, 7);
         assert_eq!(config.rate_limit_requests, 1000);
         assert_eq!(config.rate_limit_window_secs, 60);
-        assert_eq!(config.quota_bytes_per_project, 10 * 1024 * 1024 * 1024);
+        assert_eq!(config.quota_bytes_per_project, None);
         assert!(!config.has_s3_config());
         assert!(config.enable_health_compute);
         assert!(config.enable_anomaly_detection);
