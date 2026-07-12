@@ -1,6 +1,7 @@
 import { ProjectResponse } from '@/api/client'
 import {
   getEnvironmentsOptions,
+  getGroupedPageMetricsOptions,
   getMetricsOverTimeOptions,
   hasPerformanceMetricsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -30,6 +31,14 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
@@ -42,6 +51,7 @@ import {
   Monitor,
   RefreshCw,
   Smartphone,
+  X,
   Zap,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -112,7 +122,10 @@ function statusToTone(status: MetricStatus): MetricTone {
   return 'warn'
 }
 
-function formatMetricValue(value: number | null | undefined, metric: MetricKey) {
+function formatMetricValue(
+  value: number | null | undefined,
+  metric: MetricKey
+) {
   if (value === null || value === undefined) return '—'
   const t = METRIC_THRESHOLDS[metric]
   if (metric === 'cls') return value.toFixed(2)
@@ -135,7 +148,7 @@ function calculateOverallScore(metrics: any): number {
   const add = (
     val: number | null | undefined,
     key: MetricKey,
-    weight: number,
+    weight: number
   ) => {
     if (val !== null && val !== undefined && val > 0) {
       totalScore += calculateMetricScore(val, key) * weight
@@ -201,7 +214,7 @@ function MetricTile({ metric, value, history }: MetricTileProps) {
           <span
             className={cn(
               'rounded-full border px-2 py-0.5 text-[10px] font-medium',
-              STATUS_CHIP[status],
+              STATUS_CHIP[status]
             )}
           >
             {STATUS_LABEL[status]}
@@ -223,17 +236,260 @@ function MetricTile({ metric, value, history }: MetricTileProps) {
   )
 }
 
+type BreakdownDimension =
+  | 'path'
+  | 'country'
+  | 'region'
+  | 'city'
+  | 'device_type'
+  | 'browser'
+  | 'operating_system'
+
+const BREAKDOWN_DIMENSIONS: {
+  value: BreakdownDimension
+  label: string
+  column: string
+}[] = [
+  { value: 'path', label: 'Pages', column: 'Page' },
+  { value: 'country', label: 'Countries', column: 'Country' },
+  { value: 'region', label: 'Regions', column: 'Region' },
+  { value: 'city', label: 'Cities', column: 'City' },
+  { value: 'device_type', label: 'Devices', column: 'Device' },
+  { value: 'browser', label: 'Browsers', column: 'Browser' },
+  { value: 'operating_system', label: 'OS', column: 'OS' },
+]
+
+const BREAKDOWN_ROW_LIMIT = 15
+
+const BREAKDOWN_METRICS: MetricKey[] = ['ttfb', 'fcp', 'lcp', 'inp', 'cls']
+
+/** Segment filters accepted by all performance read endpoints. */
+type SpeedFilters = {
+  filter_path?: string
+  filter_country?: string
+  filter_region?: string
+  filter_city?: string
+  filter_browser?: string
+  filter_operating_system?: string
+}
+
+const FILTER_LABELS: Record<keyof SpeedFilters, string> = {
+  filter_path: 'Page',
+  filter_country: 'Country',
+  filter_region: 'Region',
+  filter_city: 'City',
+  filter_browser: 'Browser',
+  filter_operating_system: 'OS',
+}
+
+// Which filter a breakdown row click applies. Device rows are not clickable —
+// the Desktop/Mobile toggle already covers that dimension.
+const DIMENSION_FILTER_KEY: Partial<
+  Record<BreakdownDimension, keyof SpeedFilters>
+> = {
+  path: 'filter_path',
+  country: 'filter_country',
+  region: 'filter_region',
+  city: 'filter_city',
+  browser: 'filter_browser',
+  operating_system: 'filter_operating_system',
+}
+
+function BreakdownMetricCell({
+  value,
+  metric,
+}: {
+  value: number | null | undefined
+  metric: MetricKey
+}) {
+  const status =
+    value !== null && value !== undefined
+      ? getMetricStatus(value, metric)
+      : null
+  return (
+    <TableCell
+      className={cn(
+        'text-right tabular-nums',
+        status ? STATUS_TEXT[status] : 'text-muted-foreground'
+      )}
+    >
+      {formatMetricValue(value, metric)}
+    </TableCell>
+  )
+}
+
+interface SpeedBreakdownCardProps {
+  projectId: number
+  environmentId: number | null
+  startDate: string
+  endDate: string
+  device: 'desktop' | 'mobile'
+  filters: SpeedFilters
+  onFilter: (key: keyof SpeedFilters, value: string) => void
+}
+
+function SpeedBreakdownCard({
+  projectId,
+  environmentId,
+  startDate,
+  endDate,
+  device,
+  filters,
+  onFilter,
+}: SpeedBreakdownCardProps) {
+  const [dimension, setDimension] = useState<BreakdownDimension>('path')
+
+  const { data, isLoading, isError } = useQuery({
+    ...getGroupedPageMetricsOptions({
+      query: {
+        start_date: startDate,
+        end_date: endDate,
+        project_id: projectId,
+        environment_id: environmentId!,
+        device_type: device,
+        group_by: dimension,
+        ...filters,
+      },
+    }),
+    enabled: environmentId !== null,
+  })
+
+  const groups = data?.groups ?? []
+  const visibleGroups = groups.slice(0, BREAKDOWN_ROW_LIMIT)
+  const dimensionMeta = BREAKDOWN_DIMENSIONS.find((d) => d.value === dimension)
+  const dimensionLabel = dimensionMeta?.label ?? ''
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-base">Breakdown</CardTitle>
+            <CardDescription>
+              Average per group · sorted by samples · click a value to filter
+            </CardDescription>
+          </div>
+          <Tabs
+            value={dimension}
+            onValueChange={(v) => setDimension(v as BreakdownDimension)}
+          >
+            <TabsList className="h-8">
+              {BREAKDOWN_DIMENSIONS.map((d) => (
+                <TabsTrigger
+                  key={d.value}
+                  value={d.value}
+                  className="h-6 px-2.5 text-xs"
+                >
+                  {d.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-8 w-full" />
+            ))}
+          </div>
+        ) : isError ? (
+          <Alert>
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>
+              Failed to load the {dimensionLabel.toLowerCase()} breakdown.
+            </AlertDescription>
+          </Alert>
+        ) : groups.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted-foreground">
+            No samples recorded for this period.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{dimensionMeta?.column ?? ''}</TableHead>
+                  <TableHead className="text-right">Samples</TableHead>
+                  {BREAKDOWN_METRICS.map((m) => (
+                    <TableHead key={m} className="text-right">
+                      {METRIC_THRESHOLDS[m].short}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleGroups.map((g) => {
+                  const filterKey = DIMENSION_FILTER_KEY[dimension]
+                  const filterable = filterKey && g.group_key !== 'Unknown'
+                  return (
+                    <TableRow key={g.group_key}>
+                      <TableCell
+                        className="max-w-[280px] truncate font-medium"
+                        title={g.group_key}
+                      >
+                        {filterable ? (
+                          <button
+                            type="button"
+                            className="cursor-pointer truncate hover:underline"
+                            onClick={() => onFilter(filterKey, g.group_key)}
+                          >
+                            {g.group_key}
+                          </button>
+                        ) : (
+                          g.group_key
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {g.events.toLocaleString()}
+                      </TableCell>
+                      {BREAKDOWN_METRICS.map((m) => (
+                        <BreakdownMetricCell key={m} value={g[m]} metric={m} />
+                      ))}
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+            {groups.length > BREAKDOWN_ROW_LIMIT && (
+              <p className="pt-2 text-xs text-muted-foreground">
+                Top {BREAKDOWN_ROW_LIMIT} of {groups.length} groups ·{' '}
+                {(data?.total_events ?? 0).toLocaleString()} samples total
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 interface ProjectSpeedInsightsProps {
   project: ProjectResponse
 }
 
 export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
   const [selectedEnvironment, setSelectedEnvironment] = useState<number | null>(
-    null,
+    null
   )
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [timeRange, setTimeRange] = useState('7d')
   const [activeMetric, setActiveMetric] = useState<MetricKey>('lcp')
+  const [filters, setFilters] = useState<SpeedFilters>({})
+
+  const addFilter = (key: keyof SpeedFilters, value: string) =>
+    setFilters((prev) => ({ ...prev, [key]: value }))
+  const removeFilter = (key: keyof SpeedFilters) =>
+    setFilters((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  const activeFilters = Object.entries(filters) as [
+    keyof SpeedFilters,
+    string,
+  ][]
 
   const { data: environmentsData } = useQuery({
     ...getEnvironmentsOptions({
@@ -266,7 +522,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
 
   const startDate = useMemo(
     () => subDays(new Date(), getDays(timeRange)).toISOString(),
-    [timeRange],
+    [timeRange]
   )
   const endDate = useMemo(() => new Date().toISOString(), [])
 
@@ -289,6 +545,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         project_id: project.id,
         environment_id: selectedEnvironment!,
         device_type: device,
+        ...filters,
       },
     }),
     enabled: selectedEnvironment !== null,
@@ -300,7 +557,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
     return metrics.timestamps.map((timestamp: string, i: number) => ({
       timestamp: format(
         new Date(timestamp),
-        timeRange === '1d' ? 'HH:mm' : 'MMM dd',
+        timeRange === '1d' ? 'HH:mm' : 'MMM dd'
       ),
       fcp: metrics.fcp[i],
       lcp: metrics.lcp[i],
@@ -313,7 +570,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
 
   const score = useMemo(
     () => (metrics ? calculateOverallScore(metrics) : 0),
-    [metrics],
+    [metrics]
   )
 
   const hasNoDataAtAll = hasMetricsData?.has_metrics === false
@@ -339,7 +596,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
       cls: metrics?.cls ?? [],
       ttfb: metrics?.ttfb ?? [],
     }),
-    [metrics],
+    [metrics]
   )
 
   if (error) {
@@ -554,6 +811,33 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         </div>
       </div>
 
+      {/* Active segment filters — applied to every card on this page */}
+      {activeFilters.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {activeFilters.map(([key, value]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => removeFilter(key)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border bg-muted px-2.5 py-1 text-xs font-medium hover:bg-muted/60"
+            >
+              <span className="text-muted-foreground">
+                {FILTER_LABELS[key]}:
+              </span>
+              <span className="max-w-[220px] truncate">{value}</span>
+              <X className="h-3 w-3 text-muted-foreground" />
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setFilters({})}
+            className="cursor-pointer text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Clear all
+          </button>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="space-y-5">
           <Skeleton className="h-[120px] w-full" />
@@ -589,7 +873,10 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
                   Overall
                 </div>
                 <div
-                  className={cn('text-sm font-medium', STATUS_TEXT[overallStatus])}
+                  className={cn(
+                    'text-sm font-medium',
+                    STATUS_TEXT[overallStatus]
+                  )}
                 >
                   {STATUS_LABEL[overallStatus]}
                 </div>
@@ -615,7 +902,8 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
                 <div>
                   <CardTitle className="text-base">Trend</CardTitle>
                   <CardDescription>
-                    p75 over time · green/red lines show Good and Poor thresholds
+                    p75 over time · green/red lines show Good and Poor
+                    thresholds
                   </CardDescription>
                 </div>
                 <Tabs
@@ -652,7 +940,9 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
                   if (v >= 1000) return `${(v / 1000).toFixed(1)}s`
                   return `${v}`
                 }}
-                tooltipValueFormatter={(v) => formatMetricValue(v, activeMetric)}
+                tooltipValueFormatter={(v) =>
+                  formatMetricValue(v, activeMetric)
+                }
                 tooltipFooter={(v) => {
                   const status = getMetricStatus(v, activeMetric)
                   return STATUS_LABEL[status]
@@ -660,6 +950,17 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
               />
             </CardContent>
           </Card>
+
+          {/* Per-page / per-dimension breakdown */}
+          <SpeedBreakdownCard
+            projectId={project.id}
+            environmentId={selectedEnvironment}
+            startDate={startDate}
+            endDate={endDate}
+            device={device}
+            filters={filters}
+            onFilter={addFilter}
+          />
 
           {/* Targeted recommendations */}
           {failingMetrics.length > 0 ? (
@@ -686,7 +987,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
                       <div
                         className={cn(
                           'mt-0.5 rounded-md border p-1.5',
-                          STATUS_CHIP[status],
+                          STATUS_CHIP[status]
                         )}
                       >
                         <AlertTriangle className="h-3.5 w-3.5" />
