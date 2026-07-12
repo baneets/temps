@@ -51,6 +51,7 @@ import {
   Monitor,
   RefreshCw,
   Smartphone,
+  X,
   Zap,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -236,19 +237,63 @@ function MetricTile({ metric, value, history }: MetricTileProps) {
 }
 
 type BreakdownDimension =
-  'path' | 'country' | 'device_type' | 'browser' | 'operating_system'
+  | 'path'
+  | 'country'
+  | 'region'
+  | 'city'
+  | 'device_type'
+  | 'browser'
+  | 'operating_system'
 
-const BREAKDOWN_DIMENSIONS: { value: BreakdownDimension; label: string }[] = [
-  { value: 'path', label: 'Pages' },
-  { value: 'country', label: 'Countries' },
-  { value: 'device_type', label: 'Devices' },
-  { value: 'browser', label: 'Browsers' },
-  { value: 'operating_system', label: 'OS' },
+const BREAKDOWN_DIMENSIONS: {
+  value: BreakdownDimension
+  label: string
+  column: string
+}[] = [
+  { value: 'path', label: 'Pages', column: 'Page' },
+  { value: 'country', label: 'Countries', column: 'Country' },
+  { value: 'region', label: 'Regions', column: 'Region' },
+  { value: 'city', label: 'Cities', column: 'City' },
+  { value: 'device_type', label: 'Devices', column: 'Device' },
+  { value: 'browser', label: 'Browsers', column: 'Browser' },
+  { value: 'operating_system', label: 'OS', column: 'OS' },
 ]
 
 const BREAKDOWN_ROW_LIMIT = 15
 
 const BREAKDOWN_METRICS: MetricKey[] = ['ttfb', 'fcp', 'lcp', 'inp', 'cls']
+
+/** Segment filters accepted by all performance read endpoints. */
+type SpeedFilters = {
+  filter_path?: string
+  filter_country?: string
+  filter_region?: string
+  filter_city?: string
+  filter_browser?: string
+  filter_operating_system?: string
+}
+
+const FILTER_LABELS: Record<keyof SpeedFilters, string> = {
+  filter_path: 'Page',
+  filter_country: 'Country',
+  filter_region: 'Region',
+  filter_city: 'City',
+  filter_browser: 'Browser',
+  filter_operating_system: 'OS',
+}
+
+// Which filter a breakdown row click applies. Device rows are not clickable —
+// the Desktop/Mobile toggle already covers that dimension.
+const DIMENSION_FILTER_KEY: Partial<
+  Record<BreakdownDimension, keyof SpeedFilters>
+> = {
+  path: 'filter_path',
+  country: 'filter_country',
+  region: 'filter_region',
+  city: 'filter_city',
+  browser: 'filter_browser',
+  operating_system: 'filter_operating_system',
+}
 
 function BreakdownMetricCell({
   value,
@@ -278,6 +323,9 @@ interface SpeedBreakdownCardProps {
   environmentId: number | null
   startDate: string
   endDate: string
+  device: 'desktop' | 'mobile'
+  filters: SpeedFilters
+  onFilter: (key: keyof SpeedFilters, value: string) => void
 }
 
 function SpeedBreakdownCard({
@@ -285,6 +333,9 @@ function SpeedBreakdownCard({
   environmentId,
   startDate,
   endDate,
+  device,
+  filters,
+  onFilter,
 }: SpeedBreakdownCardProps) {
   const [dimension, setDimension] = useState<BreakdownDimension>('path')
 
@@ -295,7 +346,9 @@ function SpeedBreakdownCard({
         end_date: endDate,
         project_id: projectId,
         environment_id: environmentId!,
+        device_type: device,
         group_by: dimension,
+        ...filters,
       },
     }),
     enabled: environmentId !== null,
@@ -303,8 +356,8 @@ function SpeedBreakdownCard({
 
   const groups = data?.groups ?? []
   const visibleGroups = groups.slice(0, BREAKDOWN_ROW_LIMIT)
-  const dimensionLabel =
-    BREAKDOWN_DIMENSIONS.find((d) => d.value === dimension)?.label ?? ''
+  const dimensionMeta = BREAKDOWN_DIMENSIONS.find((d) => d.value === dimension)
+  const dimensionLabel = dimensionMeta?.label ?? ''
 
   return (
     <Card>
@@ -313,7 +366,7 @@ function SpeedBreakdownCard({
           <div>
             <CardTitle className="text-base">Breakdown</CardTitle>
             <CardDescription>
-              Average per group, all devices · sorted by samples
+              Average per group · sorted by samples · click a value to filter
             </CardDescription>
           </div>
           <Tabs
@@ -357,7 +410,7 @@ function SpeedBreakdownCard({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{dimensionLabel.replace(/s$/, '')}</TableHead>
+                  <TableHead>{dimensionMeta?.column ?? ''}</TableHead>
                   <TableHead className="text-right">Samples</TableHead>
                   {BREAKDOWN_METRICS.map((m) => (
                     <TableHead key={m} className="text-right">
@@ -367,22 +420,36 @@ function SpeedBreakdownCard({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visibleGroups.map((g) => (
-                  <TableRow key={g.group_key}>
-                    <TableCell
-                      className="max-w-[280px] truncate font-medium"
-                      title={g.group_key}
-                    >
-                      {g.group_key}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-muted-foreground">
-                      {g.events.toLocaleString()}
-                    </TableCell>
-                    {BREAKDOWN_METRICS.map((m) => (
-                      <BreakdownMetricCell key={m} value={g[m]} metric={m} />
-                    ))}
-                  </TableRow>
-                ))}
+                {visibleGroups.map((g) => {
+                  const filterKey = DIMENSION_FILTER_KEY[dimension]
+                  const filterable = filterKey && g.group_key !== 'Unknown'
+                  return (
+                    <TableRow key={g.group_key}>
+                      <TableCell
+                        className="max-w-[280px] truncate font-medium"
+                        title={g.group_key}
+                      >
+                        {filterable ? (
+                          <button
+                            type="button"
+                            className="cursor-pointer truncate hover:underline"
+                            onClick={() => onFilter(filterKey, g.group_key)}
+                          >
+                            {g.group_key}
+                          </button>
+                        ) : (
+                          g.group_key
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {g.events.toLocaleString()}
+                      </TableCell>
+                      {BREAKDOWN_METRICS.map((m) => (
+                        <BreakdownMetricCell key={m} value={g[m]} metric={m} />
+                      ))}
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
             {groups.length > BREAKDOWN_ROW_LIMIT && (
@@ -409,6 +476,20 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [timeRange, setTimeRange] = useState('7d')
   const [activeMetric, setActiveMetric] = useState<MetricKey>('lcp')
+  const [filters, setFilters] = useState<SpeedFilters>({})
+
+  const addFilter = (key: keyof SpeedFilters, value: string) =>
+    setFilters((prev) => ({ ...prev, [key]: value }))
+  const removeFilter = (key: keyof SpeedFilters) =>
+    setFilters((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  const activeFilters = Object.entries(filters) as [
+    keyof SpeedFilters,
+    string,
+  ][]
 
   const { data: environmentsData } = useQuery({
     ...getEnvironmentsOptions({
@@ -464,6 +545,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         project_id: project.id,
         environment_id: selectedEnvironment!,
         device_type: device,
+        ...filters,
       },
     }),
     enabled: selectedEnvironment !== null,
@@ -729,6 +811,33 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         </div>
       </div>
 
+      {/* Active segment filters — applied to every card on this page */}
+      {activeFilters.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {activeFilters.map(([key, value]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => removeFilter(key)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border bg-muted px-2.5 py-1 text-xs font-medium hover:bg-muted/60"
+            >
+              <span className="text-muted-foreground">
+                {FILTER_LABELS[key]}:
+              </span>
+              <span className="max-w-[220px] truncate">{value}</span>
+              <X className="h-3 w-3 text-muted-foreground" />
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setFilters({})}
+            className="cursor-pointer text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            Clear all
+          </button>
+        </div>
+      )}
+
       {isLoading ? (
         <div className="space-y-5">
           <Skeleton className="h-[120px] w-full" />
@@ -848,6 +957,9 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             environmentId={selectedEnvironment}
             startDate={startDate}
             endDate={endDate}
+            device={device}
+            filters={filters}
+            onFilter={addFilter}
           />
 
           {/* Targeted recommendations */}
