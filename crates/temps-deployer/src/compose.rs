@@ -538,6 +538,21 @@ impl ComposeExecutor {
                         .to_string(),
                 });
             };
+            // Service names are interpolated verbatim into the generated
+            // `docker-compose.temps-security.yml` override. A name containing a
+            // newline or `: ` would corrupt that YAML and could silently drop the
+            // sandbox-hardening layer, so constrain names to the Compose spec
+            // character set.
+            if !Self::is_valid_service_name(service_name) {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: service_name.to_string(),
+                    field: "services".to_string(),
+                    reason: "service names may only contain letters, digits, '.', '_' and '-' \
+                             (and must start alphanumeric); other characters can corrupt the \
+                             generated security override"
+                        .to_string(),
+                });
+            }
             let Some(service) = service_value.as_mapping() else {
                 continue;
             };
@@ -607,12 +622,31 @@ impl ComposeExecutor {
                  outside this deployment (e.g. other tenants' or Temps infrastructure \
                  containers)",
             )?;
+            self.reject_present(
+                service,
+                service_name,
+                "sysctls",
+                "setting kernel parameters (sysctls) is not allowed for compose deployments",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "group_add",
+                "adding supplementary groups (e.g. the docker group) can escalate host access",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "cgroup_parent",
+                "cgroup_parent can place the container in an arbitrary host cgroup",
+            )?;
             self.reject_host_namespace(service, service_name, "network_mode")?;
             self.reject_host_namespace(service, service_name, "pid")?;
             self.reject_host_namespace(service, service_name, "ipc")?;
             self.reject_host_namespace(service, service_name, "cgroup")?;
             self.reject_host_namespace(service, service_name, "uts")?;
             self.reject_host_namespace(service, service_name, "userns_mode")?;
+            self.reject_deploy_devices(service, service_name)?;
             self.validate_build_options(service, service_name)?;
             self.validate_service_volumes(service, service_name, &forbidden_named_volumes)?;
         }
@@ -635,17 +669,48 @@ impl ComposeExecutor {
             let Some(def_map) = def.as_mapping() else {
                 continue;
             };
+
+            // A non-`local` volume driver invokes an external volume plugin
+            // (NFS/CIFS clients, cloud plugins) that can mount attacker-controlled
+            // remote or host filesystems into the container.
+            if let Some(driver) = def_map
+                .get(YamlValue::String("driver".to_string()))
+                .and_then(YamlValue::as_str)
+            {
+                if driver != "local" {
+                    forbidden.insert(name.to_string());
+                    continue;
+                }
+            }
+
             let Some(driver_opts) = def_map
                 .get(YamlValue::String("driver_opts".to_string()))
                 .and_then(YamlValue::as_mapping)
             else {
                 continue;
             };
+
+            // A dangerous bind `device` (local-driver bind mount of a host path).
             if let Some(device) = driver_opts
                 .get(YamlValue::String("device".to_string()))
                 .and_then(YamlValue::as_str)
             {
                 if Self::is_dangerous_host_path(device) {
+                    forbidden.insert(name.to_string());
+                    continue;
+                }
+            }
+
+            // A remote/network filesystem `type` (e.g. `type: nfs` with an
+            // `addr=` option) mounts an off-host filesystem even under the
+            // `local` driver.
+            if let Some(fs_type) = driver_opts
+                .get(YamlValue::String("type".to_string()))
+                .and_then(YamlValue::as_str)
+            {
+                const NETWORK_FS: &[&str] =
+                    &["nfs", "nfs4", "cifs", "smb", "smbfs", "glusterfs", "ceph"];
+                if NETWORK_FS.contains(&fs_type.to_ascii_lowercase().as_str()) {
                     forbidden.insert(name.to_string());
                 }
             }
@@ -723,7 +788,80 @@ impl ComposeExecutor {
                 reason: "host network during build is not allowed".to_string(),
             });
         }
+        if build_map.contains_key(YamlValue::String("ssh".to_string())) {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: service_name.to_string(),
+                field: "build.ssh".to_string(),
+                reason: "build.ssh forwards the host SSH agent into the build and can leak \
+                         host keys"
+                    .to_string(),
+            });
+        }
+        // `context` and `dockerfile` become the Docker build context / Dockerfile
+        // path. An absolute or project-escaping host path (or an interpolated one)
+        // would send arbitrary host directories into the build (`COPY . /`), so
+        // confine them the same way as bind sources.
+        for field in ["context", "dockerfile"] {
+            if let Some(value) = build_map
+                .get(YamlValue::String(field.to_string()))
+                .and_then(YamlValue::as_str)
+            {
+                if Self::is_dangerous_host_path(value) {
+                    return Err(ComposeError::SecurityPolicyViolation {
+                        service: service_name.to_string(),
+                        field: format!("build.{field}"),
+                        reason: format!(
+                            "build.{field} must be a confined relative path; absolute, \
+                             project-escaping, or interpolated values are not allowed"
+                        ),
+                    });
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Reject `deploy.resources.reservations.devices` — the long-form equivalent
+    /// of the already-blocked `gpus:` short form. Docker Compose translates
+    /// `gpus:` into exactly this structure, so leaving it unchecked allows the
+    /// same host-accelerator passthrough the `gpus` guard is meant to prevent.
+    fn reject_deploy_devices(
+        &self,
+        service: &serde_yaml::Mapping,
+        service_name: &str,
+    ) -> Result<(), ComposeError> {
+        let has_devices = service
+            .get(YamlValue::String("deploy".to_string()))
+            .and_then(YamlValue::as_mapping)
+            .and_then(|d| d.get(YamlValue::String("resources".to_string())))
+            .and_then(YamlValue::as_mapping)
+            .and_then(|r| r.get(YamlValue::String("reservations".to_string())))
+            .and_then(YamlValue::as_mapping)
+            .is_some_and(|res| res.contains_key(YamlValue::String("devices".to_string())));
+        if has_devices {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: service_name.to_string(),
+                field: "deploy.resources.reservations.devices".to_string(),
+                reason: "device reservations expose host accelerators/devices (equivalent to \
+                         the blocked 'gpus') and are not allowed"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether a Compose service name is safe to interpolate into generated YAML.
+    /// Restricts to the Compose spec character set (alphanumeric start, then
+    /// letters/digits/`.`/`_`/`-`), rejecting names with newlines, colons, or
+    /// spaces that could corrupt the generated security override.
+    fn is_valid_service_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphanumeric() => {}
+            _ => return false,
+        }
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     }
 
     /// Service fields whose value (or any nested sequence/mapping value) must
@@ -1176,6 +1314,7 @@ impl ComposeExecutor {
             "userns_mode",
             "volumes",
             "volumes_from",
+            "group_add",
         ];
 
         for key in service.keys().filter_map(Self::yaml_key) {
@@ -2578,6 +2717,140 @@ services:
             .validate_compose_security_policy("compose file", tmp_bind)
             .unwrap_err();
         assert_eq!(violation_field(err), "volumes");
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_host_control_keys() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // Each host-affecting key must be rejected in isolation (not only when
+        // it appears alongside another violation that short-circuits first).
+        let cases = [
+            ("sysctls", "services:\n  a:\n    image: alpine\n    sysctls:\n      net.ipv4.ip_forward: \"1\"\n"),
+            ("group_add", "services:\n  a:\n    image: alpine\n    group_add:\n      - docker\n"),
+            ("cgroup_parent", "services:\n  a:\n    image: alpine\n    cgroup_parent: /custom.slice\n"),
+        ];
+        for (field, yaml) in cases {
+            let err = executor
+                .validate_compose_security_policy("compose file", yaml)
+                .unwrap_err();
+            assert_eq!(
+                violation_field(err),
+                field,
+                "expected {field} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_deploy_devices() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // Long-form device reservation — the equivalent of the blocked `gpus:`.
+        let yaml = "services:\n  gpu:\n    image: alpine\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", yaml)
+            .unwrap_err();
+        assert_eq!(
+            violation_field(err),
+            "deploy.resources.reservations.devices"
+        );
+
+        // A benign deploy block (replicas only) is still allowed.
+        let benign = "services:\n  web:\n    image: alpine\n    deploy:\n      replicas: 2\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", benign)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_build_context_and_ssh() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // Absolute build context would send an arbitrary host dir into the build.
+        let ctx = "services:\n  app:\n    build:\n      context: /etc\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", ctx)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "build.context");
+
+        // Project-escaping dockerfile path.
+        let dockerfile =
+            "services:\n  app:\n    build:\n      context: .\n      dockerfile: ../../../etc/x\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", dockerfile)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "build.dockerfile");
+
+        // SSH agent forwarding during build.
+        let ssh =
+            "services:\n  app:\n    build:\n      context: .\n      ssh:\n        - default\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", ssh)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "build.ssh");
+
+        // A confined relative build context is accepted.
+        let ok =
+            "services:\n  app:\n    build:\n      context: ./app\n      dockerfile: Dockerfile\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", ok)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_network_volume_driver() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // Non-local driver invokes an external volume plugin.
+        let plugin = "services:\n  app:\n    image: alpine\n    volumes:\n      - vol:/data\nvolumes:\n  vol:\n    driver: some-plugin\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", plugin)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "volumes");
+
+        // Local driver with an NFS type mounts an off-host filesystem.
+        let nfs = "services:\n  app:\n    image: alpine\n    volumes:\n      - vol:/data\nvolumes:\n  vol:\n    driver: local\n    driver_opts:\n      type: nfs\n      o: addr=attacker.example.com,rw\n      device: \":/exports/root\"\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", nfs)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "volumes");
+
+        // A plain local named volume is fine.
+        let ok = "services:\n  app:\n    image: alpine\n    volumes:\n      - vol:/data\nvolumes:\n  vol: {}\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", ok)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_unsafe_service_names() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // A service name carrying newlines/YAML structure would corrupt the
+        // generated security override; reject it up front.
+        let yaml =
+            "services:\n  ? \"evil:\\n  cap_drop:\\n  - ALL\\n  legit\"\n  :\n    image: alpine\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", yaml)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "services");
+
+        // Normal names pass the character-set check.
+        assert!(ComposeExecutor::is_valid_service_name("web-1.api_v2"));
+        assert!(!ComposeExecutor::is_valid_service_name("evil:\n  x"));
+        assert!(!ComposeExecutor::is_valid_service_name("-leading-dash"));
+        assert!(!ComposeExecutor::is_valid_service_name(""));
     }
 
     #[test]
