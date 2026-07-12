@@ -9,6 +9,19 @@ const consoleKitEntry = path.resolve(__dirname, 'packages/console-kit/src/index.
 
 export default defineConfig({
   plugins: [pluginReact()],
+  // Rsbuild v2 no longer auto-populates `performance.chunkSplit` on the
+  // resolved config (it's deprecated in favor of `splitChunks`, but still
+  // supported). @rsbuild/plugin-react@1.4.0 reads
+  // `environment.config.performance.chunkSplit.strategy` without a null
+  // check, so leaving this unset crashes `rsbuild build` with
+  // "Cannot read properties of undefined (reading 'strategy')". Setting it
+  // explicitly reproduces rsbuild v1's default strategy byte-for-byte, so
+  // there's no behavior change — just an explicit opt-in the plugin needs.
+  // Safe to drop once @rsbuild/plugin-react is bumped to a v2-compatible
+  // release (tracked separately).
+  performance: {
+    chunkSplit: { strategy: 'split-by-experience' },
+  },
   resolve: {
     alias: {
       // Local workspace package — pin explicitly so rsbuild resolves it even
@@ -63,11 +76,6 @@ export default defineConfig({
     }),
   },
   dev: {
-    lazyCompilation: false, // Add headers to prevent caching in development
-    headers: {
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      Pragma: 'no-cache',
-      Expires: '0',
-    },
+    lazyCompilation: false,
   },
 })
