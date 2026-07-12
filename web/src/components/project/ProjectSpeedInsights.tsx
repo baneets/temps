@@ -40,6 +40,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { SpeedWorldMap } from '@/components/project/SpeedWorldMap'
 import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
 import { format, subDays } from 'date-fns'
@@ -950,6 +951,17 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
               />
             </CardContent>
           </Card>
+
+          {/* Web vitals by country, on a world map */}
+          <SpeedWorldMap
+            projectId={project.id}
+            environmentId={selectedEnvironment}
+            startDate={startDate}
+            endDate={endDate}
+            device={device}
+            filters={filters}
+            onCountryClick={(country) => addFilter('filter_country', country)}
+          />
 
           {/* Per-page / per-dimension breakdown */}
           <SpeedBreakdownCard

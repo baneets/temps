@@ -46,6 +46,7 @@
         "fuse.js": "^7.4.2",
         "ghostty-web": "^0.4.0",
         "highlight.js": "^11.11.1",
+        "iso-3166": "^4.3.0",
         "lucide-react": "^0.544.0",
         "monaco-editor": "^0.55.1",
         "nanoid": "^5.1.16",
@@ -1017,6 +1018,8 @@
     "isarray": ["isarray@2.0.5", "", {}, "sha512-xHjhDr3cNBK0BzdUJSPXZntQUx/mwMS5Rw4A7lPJ90XGAO6ISP/ePDNuo0vhqOZU+UD5JoodwCAAoZQd3FeAKw=="],
 
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
+
+    "iso-3166": ["iso-3166@4.4.0", "", {}, "sha512-I6ylkNQgxVh7cYADMUJpqBUdremGvyGZkDRSk9Cdic/ITBUemsllQnUeRpz7yDKyfgAXI9oPa5A9dia+7IXLqw=="],
 
     "iterator.prototype": ["iterator.prototype@1.1.5", "", { "dependencies": { "define-data-property": "^1.1.4", "es-object-atoms": "^1.0.0", "get-intrinsic": "^1.2.6", "get-proto": "^1.0.0", "has-symbols": "^1.1.0", "set-function-name": "^2.0.2" } }, "sha512-H0dkQoCa3b2VEeKQBOxFph+JAbcrQdE7KC0UkqwpLmv2EC4P41QXP+rqo9wYodACiG5/WM5s9oDApTU8utwj9g=="],
 
