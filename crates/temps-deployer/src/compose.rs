@@ -152,6 +152,26 @@ impl ComposeExecutor {
             .as_deref()
             .unwrap_or("docker-compose.yml");
 
+        // Lexical path validation cannot see repository symlinks. Resolve every
+        // host path from the same base directory Docker Compose uses, after the
+        // checkout and compose files exist but before build/up can touch the
+        // host. This closes `./data -> /` style escapes for bind mounts,
+        // configs/secrets, local-driver binds, and build paths.
+        Self::validate_compose_filesystem_confinement(
+            &effective_dir,
+            compose_file,
+            "compose file",
+            &request.compose_content,
+        )?;
+        if let Some(ref compose_override) = request.compose_override {
+            Self::validate_compose_filesystem_confinement(
+                &effective_dir,
+                compose_file,
+                "compose override",
+                compose_override,
+            )?;
+        }
+
         // 2. Build images if compose file has build: directives
         if has_build {
             self.compose_build(
@@ -316,17 +336,8 @@ impl ComposeExecutor {
             .as_deref()
             .unwrap_or("docker-compose.yml");
         Self::validate_relative_path(compose_file, "compose_path")?;
-        let compose_path = project_dir.join(compose_file);
-
-        // Ensure parent directories exist (for nested paths like "subdir/docker-compose.yml")
-        if let Some(parent) = compose_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ComposeError::FileWriteFailed {
-                    path: parent.display().to_string(),
-                    reason: e.to_string(),
-                })?;
-        }
+        let compose_path =
+            Self::confined_write_path(project_dir, Path::new(compose_file), "compose_path")?;
 
         // If the user override defines ports for specific services, strip those
         // ports from the base compose file. Docker Compose merges (appends) port
@@ -356,7 +367,7 @@ impl ComposeExecutor {
         // Write .env file (repo's original .env content if any)
         if let Some(ref env_content) = request.env_content {
             if !env_content.trim().is_empty() {
-                let env_path = project_dir.join(".env");
+                let env_path = Self::confined_write_path(project_dir, Path::new(".env"), ".env")?;
                 tokio::fs::write(&env_path, env_content.trim())
                     .await
                     .map_err(|e| ComposeError::FileWriteFailed {
@@ -375,7 +386,8 @@ impl ComposeExecutor {
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let temps_env_path = project_dir.join(".env.temps");
+            let temps_env_path =
+                Self::confined_write_path(project_dir, Path::new(".env.temps"), ".env.temps")?;
             tokio::fs::write(&temps_env_path, &temps_env)
                 .await
                 .map_err(|e| ComposeError::FileWriteFailed {
@@ -384,7 +396,11 @@ impl ComposeExecutor {
                 })?;
 
             // Write Temps env override (auto-generated, injects .env.temps into every service)
-            let temps_override_path = project_dir.join("docker-compose.temps-env.yml");
+            let temps_override_path = Self::confined_write_path(
+                project_dir,
+                Path::new("docker-compose.temps-env.yml"),
+                "docker-compose.temps-env.yml",
+            )?;
             let override_content =
                 self.generate_env_override(&request.compose_content, ".env.temps");
             tokio::fs::write(&temps_override_path, &override_content)
@@ -398,7 +414,11 @@ impl ComposeExecutor {
         // Write Temps security override (injects sandbox hardening into every service).
         let security_content = self.generate_security_override(&request.compose_content);
         if !security_content.is_empty() {
-            let security_override_path = project_dir.join("docker-compose.temps-security.yml");
+            let security_override_path = Self::confined_write_path(
+                project_dir,
+                Path::new("docker-compose.temps-security.yml"),
+                "docker-compose.temps-security.yml",
+            )?;
             tokio::fs::write(&security_override_path, &security_content)
                 .await
                 .map_err(|e| ComposeError::FileWriteFailed {
@@ -409,7 +429,11 @@ impl ComposeExecutor {
 
         // Write Temps labels override (injects sh.temps.* labels into every service for log collection)
         if !request.labels.is_empty() {
-            let labels_override_path = project_dir.join("docker-compose.temps-labels.yml");
+            let labels_override_path = Self::confined_write_path(
+                project_dir,
+                Path::new("docker-compose.temps-labels.yml"),
+                "docker-compose.temps-labels.yml",
+            )?;
             let labels_content =
                 self.generate_labels_override(&request.compose_content, &request.labels);
             if !labels_content.is_empty() {
@@ -433,7 +457,11 @@ impl ComposeExecutor {
                     user_override,
                 )?;
 
-                let override_path = project_dir.join("docker-compose.temps-override.yml");
+                let override_path = Self::confined_write_path(
+                    project_dir,
+                    Path::new("docker-compose.temps-override.yml"),
+                    "docker-compose.temps-override.yml",
+                )?;
                 tokio::fs::write(&override_path, user_override)
                     .await
                     .map_err(|e| ComposeError::FileWriteFailed {
@@ -461,6 +489,60 @@ impl ComposeExecutor {
         self.validate_compose_security_policy("compose file", compose_content)?;
         if let Some(override_content) = compose_override {
             self.validate_compose_security_policy("compose override", override_content)?;
+        }
+        Ok(())
+    }
+
+    /// Filesystem-aware preflight for repository-backed Compose deployments.
+    /// This runs before the old stack is torn down, while `deploy` repeats the
+    /// checks immediately before build/up as defense against later changes.
+    pub fn preflight_validate_filesystem(
+        &self,
+        project_dir: &Path,
+        compose_file: &str,
+        compose_content: &str,
+        compose_override: Option<&str>,
+    ) -> Result<(), ComposeError> {
+        Self::validate_compose_filesystem_confinement(
+            project_dir,
+            compose_file,
+            "compose file",
+            compose_content,
+        )?;
+        if let Some(override_content) = compose_override {
+            Self::validate_compose_filesystem_confinement(
+                project_dir,
+                compose_file,
+                "compose override",
+                override_content,
+            )?;
+        }
+
+        // Validate all possible repository write destinations up front. The
+        // write path checks are repeated at the actual write to reduce the
+        // check/use window.
+        for (path, field) in [
+            (compose_file, "compose_path"),
+            (".env", ".env"),
+            (".env.temps", ".env.temps"),
+            (
+                "docker-compose.temps-env.yml",
+                "docker-compose.temps-env.yml",
+            ),
+            (
+                "docker-compose.temps-security.yml",
+                "docker-compose.temps-security.yml",
+            ),
+            (
+                "docker-compose.temps-labels.yml",
+                "docker-compose.temps-labels.yml",
+            ),
+            (
+                "docker-compose.temps-override.yml",
+                "docker-compose.temps-override.yml",
+            ),
+        ] {
+            Self::confined_write_path(project_dir, Path::new(path), field)?;
         }
         Ok(())
     }
@@ -640,6 +722,36 @@ impl ComposeExecutor {
                 "cgroup_parent",
                 "cgroup_parent can place the container in an arbitrary host cgroup",
             )?;
+            self.reject_present(
+                service,
+                service_name,
+                "runtime",
+                "selecting an alternate OCI runtime can bypass the enforced container sandbox",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "oom_kill_disable",
+                "disabling the OOM killer can turn container memory pressure into a host-wide denial of service",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "shm_size",
+                "custom shared-memory sizing is not allowed because aggregate tmpfs-backed memory is not host-bounded",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "tmpfs",
+                "user-defined tmpfs mounts are not allowed because their aggregate host-memory use is not bounded",
+            )?;
+            self.reject_present(
+                service,
+                service_name,
+                "ulimits",
+                "overriding container ulimits is not allowed for compose deployments",
+            )?;
             self.reject_host_namespace(service, service_name, "network_mode")?;
             self.reject_host_namespace(service, service_name, "pid")?;
             self.reject_host_namespace(service, service_name, "ipc")?;
@@ -754,7 +866,18 @@ impl ComposeExecutor {
         let Some(build) = service.get(YamlValue::String("build".to_string())) else {
             return Ok(());
         };
-        // Short form (`build: .`) is just a context path and carries no options.
+        // Short form (`build: .`) is itself a context path. It needs the same
+        // lexical and canonical checks as long-form `build.context`.
+        if let Some(context) = build.as_str() {
+            if !Self::is_remote_build_context(context) && Self::is_dangerous_host_path(context) {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: service_name.to_string(),
+                    field: "build.context".to_string(),
+                    reason: "build context must be a confined relative path; absolute, project-escaping, or interpolated values are not allowed".to_string(),
+                });
+            }
+            return Ok(());
+        }
         let Some(build_map) = build.as_mapping() else {
             return Ok(());
         };
@@ -797,6 +920,17 @@ impl ComposeExecutor {
                     .to_string(),
             });
         }
+        for field in ["shm_size", "ulimits"] {
+            if build_map.contains_key(YamlValue::String(field.to_string())) {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: service_name.to_string(),
+                    field: format!("build.{field}"),
+                    reason: format!(
+                        "build.{field} is not allowed because build resource overrides are not host-bounded"
+                    ),
+                });
+            }
+        }
         // `context` and `dockerfile` become the Docker build context / Dockerfile
         // path. An absolute or project-escaping host path (or an interpolated one)
         // would send arbitrary host directories into the build (`COPY . /`), so
@@ -806,6 +940,9 @@ impl ComposeExecutor {
                 .get(YamlValue::String(field.to_string()))
                 .and_then(YamlValue::as_str)
             {
+                if field == "context" && Self::is_remote_build_context(value) {
+                    continue;
+                }
                 if Self::is_dangerous_host_path(value) {
                     return Err(ComposeError::SecurityPolicyViolation {
                         service: service_name.to_string(),
@@ -886,6 +1023,11 @@ impl ComposeExecutor {
         "group_add",
         "device_cgroup_rules",
         "volumes_from",
+        "runtime",
+        "oom_kill_disable",
+        "shm_size",
+        "tmpfs",
+        "ulimits",
     ];
 
     /// Reject `${...}` / `$(...)` interpolation appearing anywhere within a
@@ -1011,6 +1153,18 @@ impl ComposeExecutor {
         };
 
         for entry in entries {
+            if entry
+                .as_mapping()
+                .and_then(|mapping| mapping.get(YamlValue::String("type".to_string())))
+                .and_then(YamlValue::as_str)
+                == Some("tmpfs")
+            {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: service_name.to_string(),
+                    field: "volumes".to_string(),
+                    reason: "user-defined tmpfs mounts are not allowed because their aggregate host-memory use is not bounded".to_string(),
+                });
+            }
             let Some(source) = Self::volume_source(entry) else {
                 continue;
             };
@@ -1166,6 +1320,275 @@ impl ComposeExecutor {
         }
     }
 
+    /// Resolve every repository-backed path used by Compose and verify the
+    /// canonical target remains inside the checked-out project. Relative-path
+    /// string checks alone cannot detect a committed symlink such as
+    /// `data -> /`, which Docker follows when it opens a bind source.
+    fn validate_compose_filesystem_confinement(
+        project_dir: &Path,
+        compose_file: &str,
+        source: &str,
+        compose_content: &str,
+    ) -> Result<(), ComposeError> {
+        if compose_content.trim().is_empty() {
+            return Ok(());
+        }
+        Self::validate_relative_path(compose_file, "compose_path")?;
+
+        let canonical_root =
+            std::fs::canonicalize(project_dir).map_err(|e| ComposeError::InvalidComposePath {
+                field: "compose project directory".to_string(),
+                path: project_dir.display().to_string(),
+                reason: format!("failed to canonicalize project directory: {e}"),
+            })?;
+        let compose_path = canonical_root.join(compose_file);
+        let compose_base =
+            compose_path
+                .parent()
+                .ok_or_else(|| ComposeError::InvalidComposePath {
+                    field: "compose_path".to_string(),
+                    path: compose_file.to_string(),
+                    reason: "compose path has no parent directory".to_string(),
+                })?;
+        let compose_base =
+            std::fs::canonicalize(compose_base).map_err(|e| ComposeError::InvalidComposePath {
+                field: "compose_path".to_string(),
+                path: compose_file.to_string(),
+                reason: format!("failed to canonicalize compose base directory: {e}"),
+            })?;
+        if !compose_base.starts_with(&canonical_root) {
+            return Err(ComposeError::InvalidComposePath {
+                field: "compose_path".to_string(),
+                path: compose_file.to_string(),
+                reason: "compose base directory resolves outside the project directory".to_string(),
+            });
+        }
+
+        let mut root: YamlValue = serde_yaml::from_str(compose_content).map_err(|e| {
+            ComposeError::InvalidComposeYaml {
+                compose_source: source.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        root.apply_merge()
+            .map_err(|e| ComposeError::InvalidComposeYaml {
+                compose_source: source.to_string(),
+                reason: format!("failed to expand YAML merge keys: {e}"),
+            })?;
+
+        for key in ["configs", "secrets"] {
+            let Some(files) = root.get(key).and_then(YamlValue::as_mapping) else {
+                continue;
+            };
+            for (name, definition) in files {
+                let name = name.as_str().unwrap_or("<unknown>");
+                let Some(file) = definition
+                    .as_mapping()
+                    .and_then(|mapping| mapping.get(YamlValue::String("file".to_string())))
+                    .and_then(YamlValue::as_str)
+                else {
+                    continue;
+                };
+                Self::canonicalize_confined_existing_path(
+                    &canonical_root,
+                    &compose_base,
+                    file,
+                    &format!("{key}.{name}"),
+                    &format!("{key}.file"),
+                )?;
+            }
+        }
+
+        // Local-driver bind volumes can hide a repository symlink in
+        // `driver_opts.device` and then expose it through an apparently named
+        // volume. Validate relative bind devices against the same compose base.
+        if let Some(volumes) = root.get("volumes").and_then(YamlValue::as_mapping) {
+            for (name, definition) in volumes {
+                let name = name.as_str().unwrap_or("<unknown>");
+                let Some(options) = definition
+                    .as_mapping()
+                    .and_then(|mapping| mapping.get(YamlValue::String("driver_opts".to_string())))
+                    .and_then(YamlValue::as_mapping)
+                else {
+                    continue;
+                };
+                let is_bind = options
+                    .get(YamlValue::String("type".to_string()))
+                    .and_then(YamlValue::as_str)
+                    == Some("none")
+                    || options
+                        .get(YamlValue::String("o".to_string()))
+                        .and_then(YamlValue::as_str)
+                        .is_some_and(|value| value.split(',').any(|option| option == "bind"));
+                if !is_bind {
+                    continue;
+                }
+                if let Some(device) = options
+                    .get(YamlValue::String("device".to_string()))
+                    .and_then(YamlValue::as_str)
+                {
+                    Self::canonicalize_confined_existing_path(
+                        &canonical_root,
+                        &compose_base,
+                        device,
+                        &format!("volumes.{name}"),
+                        "volumes.driver_opts.device",
+                    )?;
+                }
+            }
+        }
+
+        let Some(services) = root.get("services").and_then(YamlValue::as_mapping) else {
+            return Ok(());
+        };
+        for (service_name, definition) in services {
+            let service_name = service_name.as_str().unwrap_or("<unknown>");
+            let Some(service) = definition.as_mapping() else {
+                continue;
+            };
+
+            if let Some(entries) = service
+                .get(YamlValue::String("volumes".to_string()))
+                .and_then(YamlValue::as_sequence)
+            {
+                for entry in entries {
+                    let Some(bind_source) = Self::volume_source(entry) else {
+                        continue;
+                    };
+                    if Self::is_named_volume_ref(&bind_source) {
+                        continue;
+                    }
+                    Self::canonicalize_confined_existing_path(
+                        &canonical_root,
+                        &compose_base,
+                        &bind_source,
+                        service_name,
+                        "volumes",
+                    )?;
+                }
+            }
+
+            Self::validate_build_filesystem_paths(
+                &canonical_root,
+                &compose_base,
+                service,
+                service_name,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn canonicalize_confined_existing_path(
+        canonical_root: &Path,
+        base_dir: &Path,
+        raw_path: &str,
+        service: &str,
+        field: &str,
+    ) -> Result<PathBuf, ComposeError> {
+        if Self::is_dangerous_host_path(raw_path) {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: service.to_string(),
+                field: field.to_string(),
+                reason: format!(
+                    "host path '{raw_path}' must be a confined, non-interpolated relative path"
+                ),
+            });
+        }
+
+        let candidate = base_dir.join(raw_path);
+        let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+            ComposeError::SecurityPolicyViolation {
+                service: service.to_string(),
+                field: field.to_string(),
+                reason: format!(
+                    "host path '{raw_path}' must already exist and be canonicalizable before deployment: {e}"
+                ),
+            }
+        })?;
+        if !canonical.starts_with(canonical_root) {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: service.to_string(),
+                field: field.to_string(),
+                reason: format!(
+                    "host path '{raw_path}' resolves outside the compose project directory"
+                ),
+            });
+        }
+        Ok(canonical)
+    }
+
+    fn validate_build_filesystem_paths(
+        canonical_root: &Path,
+        compose_base: &Path,
+        service: &Mapping,
+        service_name: &str,
+    ) -> Result<(), ComposeError> {
+        let Some(build) = service.get(YamlValue::String("build".to_string())) else {
+            return Ok(());
+        };
+
+        let (context, dockerfile, has_inline_dockerfile) = if let Some(context) = build.as_str() {
+            (context, None, false)
+        } else if let Some(build_map) = build.as_mapping() {
+            let context = build_map
+                .get(YamlValue::String("context".to_string()))
+                .and_then(YamlValue::as_str)
+                .unwrap_or(".");
+            let dockerfile = build_map
+                .get(YamlValue::String("dockerfile".to_string()))
+                .and_then(YamlValue::as_str);
+            let has_inline =
+                build_map.contains_key(YamlValue::String("dockerfile_inline".to_string()));
+            (context, dockerfile, has_inline)
+        } else {
+            return Ok(());
+        };
+
+        // Remote Git/HTTP build contexts do not resolve against the host
+        // checkout. Local/file schemes are intentionally not exempted.
+        if Self::is_remote_build_context(context) {
+            return Ok(());
+        }
+
+        let canonical_context = Self::canonicalize_confined_existing_path(
+            canonical_root,
+            compose_base,
+            context,
+            service_name,
+            "build.context",
+        )?;
+        if let Some(dockerfile) = dockerfile {
+            Self::canonicalize_confined_existing_path(
+                canonical_root,
+                &canonical_context,
+                dockerfile,
+                service_name,
+                "build.dockerfile",
+            )?;
+        } else if !has_inline_dockerfile {
+            let default_dockerfile = canonical_context.join("Dockerfile");
+            if default_dockerfile.exists() {
+                Self::canonicalize_confined_existing_path(
+                    canonical_root,
+                    &canonical_context,
+                    "Dockerfile",
+                    service_name,
+                    "build.dockerfile",
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_remote_build_context(context: &str) -> bool {
+        ["https://", "http://", "git://", "ssh://"]
+            .iter()
+            .any(|prefix| context.starts_with(prefix))
+            || context.starts_with("git@")
+    }
+
     /// Confine a user-supplied path (e.g. `compose_path`) to the project
     /// checkout directory: reject empty values, absolute paths, and any `..`
     /// / root / prefix component that would escape the project tree.
@@ -1191,6 +1614,136 @@ impl ComposeExecutor {
             });
         }
         Ok(())
+    }
+
+    /// Return a canonical destination for a file Temps writes into the checked
+    /// out repository, rejecting committed symlinks in either the destination
+    /// or any parent directory. Git preserves symlinks, so a repository could
+    /// otherwise make `.env.temps -> /host/file` and turn a normal deployment
+    /// into an arbitrary host-file overwrite.
+    fn confined_write_path(
+        project_dir: &Path,
+        relative_path: &Path,
+        field: &str,
+    ) -> Result<PathBuf, ComposeError> {
+        let relative = relative_path
+            .to_str()
+            .ok_or_else(|| ComposeError::InvalidComposePath {
+                field: field.to_string(),
+                path: relative_path.display().to_string(),
+                reason: "path must be valid UTF-8".to_string(),
+            })?;
+        Self::validate_relative_path(relative, field)?;
+
+        let canonical_root =
+            std::fs::canonicalize(project_dir).map_err(|e| ComposeError::FileWriteFailed {
+                path: project_dir.display().to_string(),
+                reason: format!("failed to canonicalize compose project directory: {e}"),
+            })?;
+
+        let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+        let mut canonical_parent = canonical_root.clone();
+        for component in parent.components() {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(name) => canonical_parent.push(name),
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(ComposeError::InvalidComposePath {
+                        field: field.to_string(),
+                        path: relative_path.display().to_string(),
+                        reason: "write destination must remain inside the compose project"
+                            .to_string(),
+                    });
+                }
+            }
+
+            match std::fs::symlink_metadata(&canonical_parent) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ComposeError::SecurityPolicyViolation {
+                        service: "<compose-files>".to_string(),
+                        field: field.to_string(),
+                        reason: format!(
+                            "refusing to write through repository symlink '{}'",
+                            canonical_parent.display()
+                        ),
+                    });
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(ComposeError::FileWriteFailed {
+                        path: canonical_parent.display().to_string(),
+                        reason: "compose write parent exists but is not a directory".to_string(),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&canonical_parent).map_err(|e| {
+                        ComposeError::FileWriteFailed {
+                            path: canonical_parent.display().to_string(),
+                            reason: format!("failed to create confined compose directory: {e}"),
+                        }
+                    })?;
+                }
+                Err(error) => {
+                    return Err(ComposeError::FileWriteFailed {
+                        path: canonical_parent.display().to_string(),
+                        reason: format!("failed to inspect compose write parent: {error}"),
+                    });
+                }
+            }
+        }
+
+        let canonical_parent = std::fs::canonicalize(&canonical_parent).map_err(|e| {
+            ComposeError::FileWriteFailed {
+                path: canonical_parent.display().to_string(),
+                reason: format!("failed to canonicalize compose write parent: {e}"),
+            }
+        })?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: "<compose-files>".to_string(),
+                field: field.to_string(),
+                reason: "compose write destination resolves outside the project directory"
+                    .to_string(),
+            });
+        }
+
+        let file_name =
+            relative_path
+                .file_name()
+                .ok_or_else(|| ComposeError::InvalidComposePath {
+                    field: field.to_string(),
+                    path: relative_path.display().to_string(),
+                    reason: "write destination must name a file".to_string(),
+                })?;
+        let destination = canonical_parent.join(file_name);
+        match std::fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: "<compose-files>".to_string(),
+                    field: field.to_string(),
+                    reason: format!(
+                        "refusing to overwrite repository symlink '{}'",
+                        destination.display()
+                    ),
+                });
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                return Err(ComposeError::FileWriteFailed {
+                    path: destination.display().to_string(),
+                    reason: "compose write destination is a directory".to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ComposeError::FileWriteFailed {
+                    path: destination.display().to_string(),
+                    reason: format!("failed to inspect compose write destination: {error}"),
+                });
+            }
+        }
+
+        Ok(destination)
     }
 
     /// Structural allow-list for inline compose overrides. Complements the
@@ -1268,10 +1821,18 @@ impl ComposeExecutor {
         content: &str,
         label: &str,
     ) -> Result<Value, ComposeError> {
-        serde_yaml::from_str::<Value>(content).map_err(|e| ComposeError::InvalidOverride {
-            project: project_name.to_string(),
-            reason: format!("failed to parse {label} YAML: {e}"),
-        })
+        let mut compose =
+            serde_yaml::from_str::<Value>(content).map_err(|e| ComposeError::InvalidOverride {
+                project: project_name.to_string(),
+                reason: format!("failed to parse {label} YAML: {e}"),
+            })?;
+        compose
+            .apply_merge()
+            .map_err(|e| ComposeError::InvalidOverride {
+                project: project_name.to_string(),
+                reason: format!("failed to expand YAML merge keys in {label}: {e}"),
+            })?;
+        Ok(compose)
     }
 
     fn compose_services(compose: &Value) -> Option<&Mapping> {
@@ -1315,6 +1876,11 @@ impl ComposeExecutor {
             "volumes",
             "volumes_from",
             "group_add",
+            "runtime",
+            "oom_kill_disable",
+            "shm_size",
+            "tmpfs",
+            "ulimits",
         ];
 
         for key in service.keys().filter_map(Self::yaml_key) {
@@ -3024,6 +3590,180 @@ services:
         assert!(executor
             .validate_compose_security_policy("compose file", ok)
             .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filesystem_confinement_rejects_symlink_host_paths() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        symlink("/", root.path().join("escape")).unwrap();
+
+        let bind =
+            "services:\n  app:\n    image: alpine\n    volumes:\n      - ./escape:/host:ro\n";
+        let err = ComposeExecutor::validate_compose_filesystem_confinement(
+            root.path(),
+            "compose.yml",
+            "compose file",
+            bind,
+        )
+        .unwrap_err();
+        assert_eq!(violation_field(err), "volumes");
+
+        let config = "services:\n  app:\n    image: alpine\nconfigs:\n  host:\n    file: ./escape/etc/passwd\n";
+        let err = ComposeExecutor::validate_compose_filesystem_confinement(
+            root.path(),
+            "compose.yml",
+            "compose file",
+            config,
+        )
+        .unwrap_err();
+        assert_eq!(violation_field(err), "configs.file");
+
+        let build = "services:\n  app:\n    build: ./escape\n";
+        let err = ComposeExecutor::validate_compose_filesystem_confinement(
+            root.path(),
+            "compose.yml",
+            "compose file",
+            build,
+        )
+        .unwrap_err();
+        assert_eq!(violation_field(err), "build.context");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_filesystem_confinement_rejects_symlink_dockerfile_and_write_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("app")).unwrap();
+        symlink("/etc/passwd", root.path().join("app/Dockerfile")).unwrap();
+
+        let compose = "services:\n  app:\n    build: ./app\n";
+        let err = ComposeExecutor::validate_compose_filesystem_confinement(
+            root.path(),
+            "compose.yml",
+            "compose file",
+            compose,
+        )
+        .unwrap_err();
+        assert_eq!(violation_field(err), "build.dockerfile");
+
+        symlink(
+            "/tmp/temps-compose-write-target",
+            root.path().join(".env.temps"),
+        )
+        .unwrap();
+        let err = ComposeExecutor::confined_write_path(
+            root.path(),
+            Path::new(".env.temps"),
+            ".env.temps",
+        )
+        .unwrap_err();
+        assert_eq!(violation_field(err), ".env.temps");
+    }
+
+    #[test]
+    fn test_filesystem_confinement_allows_existing_paths_inside_nested_compose_base() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("apps/app");
+        std::fs::create_dir_all(app.join("data")).unwrap();
+        std::fs::write(app.join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(root.path().join("apps/config.txt"), "safe\n").unwrap();
+
+        let compose = r#"
+services:
+  app:
+    build: ./app
+    volumes:
+      - ./app/data:/data
+configs:
+  app-config:
+    file: ./config.txt
+"#;
+        ComposeExecutor::validate_compose_filesystem_confinement(
+            root.path(),
+            "apps/compose.yml",
+            "compose file",
+            compose,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_runtime_and_oom_disable() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        for (field, yaml) in [
+            (
+                "runtime",
+                "services:\n  app:\n    image: alpine\n    runtime: kata-runtime\n",
+            ),
+            (
+                "oom_kill_disable",
+                "services:\n  app:\n    image: alpine\n    oom_kill_disable: true\n",
+            ),
+        ] {
+            let err = executor
+                .validate_compose_security_policy("compose file", yaml)
+                .unwrap_err();
+            assert_eq!(violation_field(err), field);
+        }
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_unbounded_resource_controls() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        for (field, yaml) in [
+            (
+                "shm_size",
+                "services:\n  app:\n    image: alpine\n    shm_size: 64m\n",
+            ),
+            (
+                "tmpfs",
+                "services:\n  app:\n    image: alpine\n    tmpfs:\n      - /run\n",
+            ),
+            (
+                "volumes",
+                "services:\n  app:\n    image: alpine\n    volumes:\n      - type: tmpfs\n        target: /run\n",
+            ),
+            (
+                "ulimits",
+                "services:\n  app:\n    image: alpine\n    ulimits:\n      nofile: 1024\n",
+            ),
+            (
+                "build.shm_size",
+                "services:\n  app:\n    build:\n      context: .\n      shm_size: 64m\n",
+            ),
+        ] {
+            let err = executor
+                .validate_compose_security_policy("compose file", yaml)
+                .unwrap_err();
+            assert_eq!(violation_field(err), field, "expected rejection for {yaml}");
+        }
+    }
+
+    #[test]
+    fn test_validate_compose_override_expands_merge_keys() {
+        let compose = "services:\n  web:\n    image: nginx\n";
+        let override_content = r#"
+services:
+  web:
+    x-runtime: &runtime
+      runtime: kata-runtime
+    <<: *runtime
+"#;
+        let error =
+            ComposeExecutor::validate_compose_override("temps-test", compose, override_content)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("forbidden inline override key 'runtime'"));
     }
 
     #[test]

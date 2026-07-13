@@ -227,11 +227,11 @@ impl WorkflowTask for DeployComposeJob {
         validate_relative_path(compose_file_name, "compose_path")?;
         validate_relative_path(&self.directory, "directory")?;
 
-        let compose_content = if let Some(ref inline) = self.compose_content {
-            // Inline compose content (manual project, no git repo)
-            inline.clone()
-        } else {
-            // Read from repo checkout directory
+        // Resolve the selected repository subdirectory once and carry the
+        // canonical path through reads and execution. A lexical `directory`
+        // like `./app` can still be a committed symlink to `/`; accepting that
+        // would move the entire Compose trust boundary outside the checkout.
+        let repo_path = if self.compose_content.is_none() {
             let repo_dir: String = context
                 .get_output(&self.download_job_id, "repo_dir")
                 .map_err(|e| {
@@ -246,10 +246,29 @@ impl WorkflowTask for DeployComposeJob {
                             .to_string(),
                     )
                 })?;
+            Some(canonicalize_confined_repo_path(
+                Path::new(&repo_dir),
+                Path::new(&self.directory),
+                "directory",
+            )?)
+        } else {
+            None
+        };
 
-            let compose_file_path = PathBuf::from(&repo_dir)
-                .join(&self.directory)
-                .join(compose_file_name);
+        let compose_content = if let Some(ref inline) = self.compose_content {
+            // Inline compose content (manual project, no git repo)
+            inline.clone()
+        } else {
+            let selected_repo_dir = repo_path.as_deref().ok_or_else(|| {
+                WorkflowError::JobExecutionFailed(
+                    "Canonical repository directory was not available for compose read".to_string(),
+                )
+            })?;
+            let compose_file_path = canonicalize_confined_repo_path(
+                selected_repo_dir,
+                Path::new(compose_file_name),
+                "compose_path",
+            )?;
 
             if let Some(ref log_id) = self.log_id {
                 let _ = self
@@ -278,15 +297,21 @@ impl WorkflowTask for DeployComposeJob {
         };
 
         // Read .env from repo if it exists
-        let env_content = if self.compose_content.is_none() {
-            let repo_dir: Option<String> = context
-                .get_output(&self.download_job_id, "repo_dir")
-                .ok()
-                .flatten();
-            repo_dir.and_then(|dir| {
-                let env_path = PathBuf::from(&dir).join(&self.directory).join(".env");
-                std::fs::read_to_string(&env_path).ok()
-            })
+        let env_content = if let Some(selected_repo_dir) = repo_path.as_deref() {
+            let env_candidate = selected_repo_dir.join(".env");
+            if std::fs::symlink_metadata(&env_candidate).is_ok() {
+                let env_path =
+                    canonicalize_confined_repo_path(selected_repo_dir, Path::new(".env"), ".env")?;
+                Some(std::fs::read_to_string(&env_path).map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to read repository env file at {}: {}",
+                        env_path.display(),
+                        e
+                    ))
+                })?)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -304,6 +329,22 @@ impl WorkflowTask for DeployComposeJob {
                 let _ = self.log_service.log_error(log_id, &error_msg).await;
             }
             return Err(WorkflowError::JobExecutionFailed(error_msg));
+        }
+        if let Some(selected_repo_dir) = repo_path.as_deref() {
+            if let Err(e) = self.compose_executor.preflight_validate_filesystem(
+                selected_repo_dir,
+                compose_file_name,
+                &compose_content,
+                self.compose_override.as_deref(),
+            ) {
+                let error_msg =
+                    format!("Compose filesystem security policy rejected deployment: {e}");
+                tracing::error!(error = %error_msg, "Docker Compose filesystem preflight failed");
+                if let Some(ref log_id) = self.log_id {
+                    let _ = self.log_service.log_error(log_id, &error_msg).await;
+                }
+                return Err(WorkflowError::JobExecutionFailed(error_msg));
+            }
         }
 
         // Tear down previous containers (preserve volumes for data persistence)
@@ -327,13 +368,6 @@ impl WorkflowTask for DeployComposeJob {
                 "Previous compose stack teardown failed (may not exist)"
             );
         }
-
-        // Get repo dir for build: directive support
-        let repo_dir: Option<String> = context
-            .get_output(&self.download_job_id, "repo_dir")
-            .ok()
-            .flatten();
-        let repo_path = repo_dir.map(|d| PathBuf::from(d).join(&self.directory));
 
         let request = ComposeDeployRequest {
             project_name: project_name.clone(),
@@ -496,6 +530,44 @@ fn validate_relative_path(path: &str, field: &str) -> Result<(), WorkflowError> 
     Ok(())
 }
 
+/// Canonicalize an existing repository path and prove it remains beneath the
+/// supplied base directory. This is the filesystem half of
+/// `validate_relative_path`: Git preserves symlinks, so lexical confinement is
+/// not sufficient by itself.
+fn canonicalize_confined_repo_path(
+    base_dir: &Path,
+    relative_path: &Path,
+    field: &str,
+) -> Result<PathBuf, WorkflowError> {
+    let relative = relative_path.to_str().ok_or_else(|| {
+        WorkflowError::JobValidationFailed(format!("{field} must be valid UTF-8"))
+    })?;
+    validate_relative_path(relative, field)?;
+
+    let canonical_base = std::fs::canonicalize(base_dir).map_err(|e| {
+        WorkflowError::JobValidationFailed(format!(
+            "Failed to canonicalize repository base '{}' for {field}: {e}",
+            base_dir.display()
+        ))
+    })?;
+    let canonical_path =
+        std::fs::canonicalize(canonical_base.join(relative_path)).map_err(|e| {
+            WorkflowError::JobValidationFailed(format!(
+                "Failed to canonicalize {field} '{}' beneath repository '{}': {e}",
+                relative_path.display(),
+                canonical_base.display()
+            ))
+        })?;
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(WorkflowError::JobValidationFailed(format!(
+            "{field} '{}' resolves outside repository directory '{}'",
+            relative_path.display(),
+            canonical_base.display()
+        )));
+    }
+    Ok(canonical_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +597,33 @@ mod tests {
                 "expected '{bad}' to be rejected"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_canonicalize_confined_repo_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempfile::tempdir().unwrap();
+        symlink("/", repo.path().join("app")).unwrap();
+        let err = canonicalize_confined_repo_path(repo.path(), Path::new("app"), "directory")
+            .unwrap_err();
+        assert!(matches!(&err, WorkflowError::JobValidationFailed(_)));
+        assert!(err.to_string().contains("resolves outside"));
+    }
+
+    #[test]
+    fn test_canonicalize_confined_repo_path_allows_nested_file() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("apps/web")).unwrap();
+        std::fs::write(repo.path().join("apps/web/compose.yml"), "services: {}\n").unwrap();
+
+        let project =
+            canonicalize_confined_repo_path(repo.path(), Path::new("apps/web"), "directory")
+                .unwrap();
+        let compose =
+            canonicalize_confined_repo_path(&project, Path::new("compose.yml"), "compose_path")
+                .unwrap();
+        assert!(compose.starts_with(repo.path()));
     }
 }
