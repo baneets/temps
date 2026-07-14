@@ -39,15 +39,22 @@ Add **managed DNS record automation** as an opt-in, per-domain feature on top of
 
 ### 1. Ownership marking (the core safety invariant)
 
-Every record temps creates carries a machine-readable ownership marker: a companion TXT record `_temps-owned.<name>` holding typed JSON, e.g. `{"managed_by":"temps","instance":"<install_id>","project_id":N,"environment_id":N,"v":1}` (the external-dns registry pattern). This works uniformly across all providers.
+Every record temps creates carries a machine-readable ownership marker: a companion TXT record holding typed JSON, e.g. `{"managed_by":"temps","instance":"<install_id>","record_type":"A","project_id":N,"environment_id":N,"v":1}` (the external-dns registry pattern). This works uniformly across all providers.
+
+The registry name is **type-scoped and injective** (both properties exist because their absence lets temps clobber a record it never created — found in security review):
+
+- Type-scoped: `_temps-owned-a.<name>`, `_temps-owned-aaaa.<name>`, `_temps-owned-cname.<name>`, … — owning `app` A never grants ownership of a user's `app` AAAA. The marker JSON additionally carries `record_type` and both must match.
+- Injective escaping of the record name: `_` → `__` before `*` → `_w`, so `*.staging` and a literal `wildcard.staging` (or `_w.staging`) can never share a registry name.
 
 *Implementation note (v1):* Cloudflare's per-record `comment` field was originally preferred there for dashboard visibility, but the `cloudflare` crate's DNS params don't expose it, so v1 uses the TXT registry on Cloudflare too. Comment stamping can be added later as a purely additive enhancement (the TXT registry stays authoritative).
 
 Rules, enforced in the service layer, not left to callers:
 
-- **Create:** if a record with the target name/type already exists and has no parseable temps marker → refuse, surface a conflict.
-- **Update/Delete:** only permitted when the existing record's marker parses and matches this temps instance. Unparsable or foreign marker → refuse.
+- **Create:** refuse if a record with the target name/type already exists without a covering temps marker — AND refuse if the registry name itself is occupied by a TXT that is not our marker (the marker write must never upsert over foreign content, including another install's orphan marker).
+- **Update/Delete:** only permitted when the marker parses, matches this temps instance, and covers the record type. Unparsable, foreign, or type-mismatched marker → refuse.
 - **Conflict resolution UI:** on conflict, offer *import* (adopt the record: stamp it with a marker after explicit user confirmation) or *skip*. Default is always **never overwrite**. No bulk "overwrite all."
+- **Marker hygiene:** the `instance` field is validated on parse (`[A-Za-z0-9-]`, ≤ 64 chars) so attacker-written TXT content can't inject into temps logs/UI.
+- **Concurrency:** all guarded operations on the same (zone, name) are serialized in-process through a keyed async lock. The remaining remote TOCTOU window (DNS APIs have no compare-and-swap) is an accepted residual risk.
 
 ### 2. Provider-agnostic surface, one provider per zone
 

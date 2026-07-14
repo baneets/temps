@@ -65,12 +65,16 @@ impl TempsPlugin for DnsPlugin {
                 db.clone(),
                 provider_service.clone(),
             ));
-            context.register_service(managed_record_service);
+            context.register_service(managed_record_service.clone());
+
+            let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
 
             // Create DnsAppState for handlers
             let app_state = Arc::new(DnsAppState {
                 provider_service,
                 record_service,
+                managed_record_service,
+                audit_service,
             });
             context.register_service(app_state);
 
