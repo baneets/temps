@@ -339,9 +339,9 @@ pub fn latest_control_plane_metrics() -> Option<CpSample> {
 /// the same shape worker heartbeats use. Cheap; called from the 60s health loop
 /// so the control-plane node shows live metrics like any worker.
 pub fn refresh_control_plane_metrics() {
-    use sysinfo::Disks;
+    use sysinfo::{Disks, System};
 
-    let mut sys = sysinfo::System::new();
+    let mut sys = System::new();
     sys.refresh_cpu_all();
     sys.refresh_memory();
     let disks = Disks::new_with_refreshed_list();

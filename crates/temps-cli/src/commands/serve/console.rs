@@ -134,7 +134,7 @@ async fn report_instance_started(
 fn capacity_tier_from_total_ram() -> Option<&'static str> {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
-    // sysinfo reports total_memory() in BYTES.
+    // sysinfo reports total_memory() in bytes.
     let total_bytes = sys.total_memory();
     if total_bytes == 0 {
         return None;

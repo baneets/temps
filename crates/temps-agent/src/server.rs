@@ -311,9 +311,9 @@ fn spawn_heartbeat_loop(
 
 /// Collect system resource metrics for heartbeat capacity data.
 fn collect_capacity_metrics() -> serde_json::Value {
-    use sysinfo::Disks;
+    use sysinfo::{Disks, System};
 
-    let mut sys = sysinfo::System::new();
+    let mut sys = System::new();
     sys.refresh_cpu_all();
     sys.refresh_memory();
     let disks = Disks::new_with_refreshed_list();

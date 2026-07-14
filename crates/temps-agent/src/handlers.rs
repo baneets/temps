@@ -1077,9 +1077,9 @@ pub async fn health_check(State(state): State<Arc<AgentState>>) -> impl IntoResp
 
 /// Collect real system metrics using sysinfo.
 async fn collect_system_metrics(state: &AgentState) -> NodeHealthReport {
-    use sysinfo::Disks;
+    use sysinfo::{Disks, System};
 
-    let mut sys = sysinfo::System::new();
+    let mut sys = System::new();
     sys.refresh_cpu_all();
     sys.refresh_memory();
     let disks = Disks::new_with_refreshed_list();
