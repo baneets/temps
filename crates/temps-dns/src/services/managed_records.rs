@@ -120,7 +120,10 @@ impl KeyedLocks {
     }
 
     fn get(&self, zone: &str, name: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut map = self.inner.lock().expect("keyed lock map poisoned");
+        // Poison-proof: the critical section is a plain HashMap op that can't
+        // panic, but if it somehow did, recovering the map beats turning every
+        // future DNS write into a panic until restart.
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         map.entry((zone.to_string(), name.to_string()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -128,7 +131,7 @@ impl KeyedLocks {
 
     /// Drop the map entry if no one else holds the Arc (map + caller = 2).
     fn release(&self, zone: &str, name: &str, handle: Arc<tokio::sync::Mutex<()>>) {
-        let mut map = self.inner.lock().expect("keyed lock map poisoned");
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if Arc::strong_count(&handle) == 2 {
             map.remove(&(zone.to_string(), name.to_string()));
         }

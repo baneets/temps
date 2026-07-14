@@ -299,6 +299,12 @@ impl From<DnsError> for Problem {
             DnsError::ApiError(msg) => problemdetails::new(StatusCode::BAD_GATEWAY)
                 .with_title("API Error")
                 .with_detail(msg),
+            DnsError::DomainNotManaged(domain) => problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("Domain Not Managed")
+                .with_detail(format!(
+                    "Domain {} is not managed by any DNS provider; connect a provider and add the domain under its managed domains first",
+                    domain
+                )),
             DnsError::RecordConflict { .. } => problemdetails::new(StatusCode::CONFLICT)
                 .with_title("DNS Record Conflict")
                 .with_detail(error.to_string()),
