@@ -57,6 +57,21 @@ Replace the free-form `Option<String>` at the query boundary with a `PostgresTls
 
 Each mode selects exactly one connection path. There is no retry using another mode.
 
+This guarantee must also be enforced inside `tokio-postgres`, not only in
+Temps' outer dispatch. `tokio_postgres::Config` defaults to `SslMode::Prefer`;
+with that default, the driver may continue on the raw stream when PostgreSQL
+answers the SSL negotiation request with `N`. The connector must construct the
+configuration programmatically and set:
+
+- `tokio_postgres::config::SslMode::Disable` for `disable`; and
+- `tokio_postgres::config::SslMode::Require` for both `require` and
+  `verify-full`.
+
+No mode may inherit the driver default or accept a caller-supplied connection
+string that overrides this setting. For either TLS mode, a server response that
+declines TLS is a terminal connection error before a PostgreSQL startup message,
+credentials, or queries are sent.
+
 The value `require` deliberately follows libpq semantics: it guarantees encryption but not server identity. The API schema and UI must label this clearly as “TLS, certificate not verified,” not as fully secure TLS. `verify-full` is the recommended choice whenever the server has a certificate rooted in a public or platform-trusted CA.
 
 The legacy values `allow` and `prefer` are not retained because both permit downgrade. Parsing is deliberately split into two entry points so compatibility cannot leak into new writes:
@@ -90,6 +105,11 @@ The service details API and dashboard must display the effective mode. Selecting
 Provisioning failure may still cause the existing fallback from the read-only role to the configured admin user, but that user fallback must not alter the TLS mode. Credential choice and transport policy are independent decisions.
 
 `PostgresSource::connect` gains a required TLS-mode argument and dispatches to separate helpers for plaintext, encryption-only TLS, and verified TLS. The current TLS-then-plaintext match is removed. A mode-specific failure returns immediately.
+
+The two TLS helpers also set the underlying `tokio_postgres::Config` to
+`SslMode::Require`. Removing the visible TLS-then-plaintext match while leaving
+the driver at its `Prefer` default would preserve the same downgrade one layer
+lower. The plaintext helper alone uses `SslMode::Disable` and `NoTls`.
 
 ### 4. Separate encryption-only and authenticated TLS implementations
 
@@ -157,6 +177,10 @@ Implementation is incomplete until the following tests pass.
 - Map legacy `allow` and `prefer` values to `require` only when reading existing configuration.
 - Prove `disable` makes only a plaintext connection attempt.
 - Prove `require` succeeds with a self-signed certificate and never retries plaintext after TLS failure.
+- Against a protocol fixture that answers the PostgreSQL SSL request with `N`,
+  prove both `require` and `verify-full` fail immediately and send no startup
+  message, credentials, or queries on the raw stream. This specifically guards
+  against accidentally restoring `tokio-postgres`'s default `SslMode::Prefer`.
 - Prove `require` rejects an invalid TLS 1.2 or TLS 1.3 handshake signature even though it does not validate certificate trust.
 - Prove `verify-full` accepts a trusted certificate with a matching hostname.
 - Prove `verify-full` rejects an untrusted certificate, a DNS-name mismatch, and an IP SAN mismatch without retrying another mode.
