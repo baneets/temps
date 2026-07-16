@@ -351,6 +351,16 @@ export function ProjectSecuritySettings({
               }
             />
           </div>
+          {(watch('ai_debug_chat_enabled') ?? true) === false &&
+            (watch('ai_write_actions_enabled') ?? false) === true && (
+              <Alert>
+                <AlertDescription>
+                  AI chat remains accessible because write actions are enabled —
+                  proposed changes are reviewed and confirmed inside the chat.
+                  To disable AI entirely, also turn off write actions below.
+                </AlertDescription>
+              </Alert>
+            )}
           <Separator />
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
