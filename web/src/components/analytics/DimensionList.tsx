@@ -26,7 +26,12 @@ import { format } from 'date-fns'
 import { ArrowLeft, ChevronRight, Search } from 'lucide-react'
 import * as React from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { InsightsPanel, deriveBreakdownInsights } from './insights'
+import {
+  InsightsPanel,
+  InsightsToggleButton,
+  deriveBreakdownInsights,
+  useInsightsOpen,
+} from './insights'
 import type { AiInsightContext, BreakdownFlavor } from './insights'
 
 /**
@@ -216,6 +221,7 @@ export function DimensionList({
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [search, setSearch] = React.useState('')
+  const [insightsOpen, setInsightsOpen] = useInsightsOpen()
 
   /**
    * Only the `events` dimension currently has a per-value detail page
@@ -336,12 +342,13 @@ export function DimensionList({
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6">
-      <InsightsPanel
-        insights={insights}
-        isLoading={isLoading}
-        aiContext={aiContext}
-        description={`What stands out across your ${config.plural} in this period.`}
-      />
+      {insightsOpen && (
+        <InsightsPanel
+          insights={insights}
+          isLoading={isLoading}
+          aiContext={aiContext}
+        />
+      )}
       <Card>
         <CardHeader>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -364,14 +371,20 @@ export function DimensionList({
                 </CardDescription>
               </div>
             </div>
-            <div className="relative w-full sm:w-[260px]">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={`Filter ${config.plural}...`}
-                className="pl-8"
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <InsightsToggleButton
+                open={insightsOpen}
+                onToggle={setInsightsOpen}
               />
+              <div className="relative w-full sm:w-[260px]">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={`Filter ${config.plural}...`}
+                  className="pl-8"
+                />
+              </div>
             </div>
           </div>
         </CardHeader>

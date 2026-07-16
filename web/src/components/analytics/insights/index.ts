@@ -1,4 +1,5 @@
 export { InsightsPanel } from './InsightsPanel'
+export { InsightsToggleButton, useInsightsOpen } from './InsightsToggle'
 export { OverviewInsights } from './OverviewInsights'
 export {
   deriveBreakdownInsights,

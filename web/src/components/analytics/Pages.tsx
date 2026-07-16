@@ -17,7 +17,12 @@ import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { FileText, RefreshCw } from 'lucide-react'
 import React, { useMemo } from 'react'
-import { InsightsPanel, derivePagesInsights } from './insights'
+import {
+  InsightsPanel,
+  InsightsToggleButton,
+  derivePagesInsights,
+  useInsightsOpen,
+} from './insights'
 import type { AiInsightContext } from './insights'
 import { PageListItem } from './PageListItem'
 
@@ -35,6 +40,7 @@ export function Pages({
   environment,
 }: PagesProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
+  const [insightsOpen, setInsightsOpen] = useInsightsOpen()
 
   // Fetch page paths
   const { data, isLoading, error, refetch } = useQuery({
@@ -136,12 +142,13 @@ export function Pages({
 
   return (
     <div className="flex flex-col gap-4 sm:gap-6">
-      <InsightsPanel
-        insights={insights}
-        isLoading={isLoading}
-        aiContext={aiContext}
-        description="What stands out across your pages in this period."
-      />
+      {insightsOpen && (
+        <InsightsPanel
+          insights={insights}
+          isLoading={isLoading}
+          aiContext={aiContext}
+        />
+      )}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -159,6 +166,10 @@ export function Pages({
                   {data.page_paths?.length || 0} pages
                 </Badge>
               )}
+              <InsightsToggleButton
+                open={insightsOpen}
+                onToggle={setInsightsOpen}
+              />
               <Button
                 variant="outline"
                 size="sm"

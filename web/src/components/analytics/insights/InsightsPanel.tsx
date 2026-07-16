@@ -3,7 +3,6 @@ import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
-  CardDescription,
   CardFooter,
   CardHeader,
   CardTitle,
@@ -23,7 +22,6 @@ interface InsightsPanelProps {
    * context. Omit to render a stats-only panel.
    */
   aiContext?: AiInsightContext
-  description?: string
   emptyText?: string
 }
 
@@ -35,7 +33,7 @@ const TONE_DOT: Record<InsightTone, string> = {
 
 function InsightRow({ insight }: { insight: Insight }) {
   return (
-    <li className="flex items-start justify-between gap-4 px-6 py-3.5">
+    <li className="flex items-start justify-between gap-4 px-4 py-2.5">
       <div className="flex min-w-0 items-start gap-2.5">
         <span
           className={`mt-1.5 size-1.5 shrink-0 rounded-full ${TONE_DOT[insight.tone]}`}
@@ -72,7 +70,7 @@ function InsightRow({ insight }: { insight: Insight }) {
 
 function RowSkeleton() {
   return (
-    <li className="flex items-start justify-between gap-4 px-6 py-3.5">
+    <li className="flex items-start justify-between gap-4 px-4 py-2.5">
       <div className="flex min-w-0 flex-1 items-start gap-2.5">
         <Skeleton className="mt-1.5 size-1.5 shrink-0 rounded-full" />
         <div className="min-w-0 flex-1 space-y-2">
@@ -96,7 +94,6 @@ export function InsightsPanel({
   insights,
   isLoading,
   aiContext,
-  description = 'What stands out in this period.',
   emptyText = 'Not enough data in this period to surface insights.',
 }: InsightsPanelProps) {
   const ai = useAiInsights()
@@ -111,17 +108,14 @@ export function InsightsPanel({
 
   return (
     <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-2">
-          <div>
-            <CardTitle>Insights</CardTitle>
-            <CardDescription>{description}</CardDescription>
-          </div>
+      <CardHeader className="py-3">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm font-medium">Insights</CardTitle>
           {aiContext && (
             <Button
               variant="outline"
               size="sm"
-              className="shrink-0 gap-1.5"
+              className="h-7 shrink-0 gap-1.5"
               disabled={isLoading || ai.isPending}
               onClick={() => ai.mutate(aiContext)}
             >
@@ -147,7 +141,7 @@ export function InsightsPanel({
             <RowSkeleton />
           </ul>
         ) : rows.length === 0 && !ai.isPending && !aiErrorMessage ? (
-          <p className="px-6 pb-6 text-sm text-muted-foreground">{emptyText}</p>
+          <p className="px-4 pb-4 text-sm text-muted-foreground">{emptyText}</p>
         ) : (
           <ul role="list" className="divide-y">
             {rows.map((insight) => (
@@ -160,7 +154,7 @@ export function InsightsPanel({
               </>
             )}
             {aiErrorMessage && !ai.isPending && (
-              <li className="px-6 py-3.5">
+              <li className="px-4 py-2.5">
                 <p className="text-sm text-destructive">{aiErrorMessage}</p>
               </li>
             )}
