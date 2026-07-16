@@ -147,6 +147,7 @@ export function Pages({
           insights={insights}
           isLoading={isLoading}
           aiContext={aiContext}
+          project={{ id: project.id, slug: project.slug, name: project.name }}
         />
       )}
       <Card>

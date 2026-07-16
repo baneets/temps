@@ -12,8 +12,7 @@ import {
   deriveTimingInsights,
 } from './derive'
 import { InsightsPanel } from './InsightsPanel'
-import type { Insight } from './types'
-import type { AiInsightContext } from './useAiInsights'
+import type { AiInsightContext, Insight } from './types'
 
 interface OverviewInsightsProps {
   project: ProjectResponse
@@ -185,6 +184,7 @@ export function OverviewInsights({
       insights={insights}
       isLoading={isLoading}
       aiContext={aiContext}
+      project={{ id: project.id, slug: project.slug, name: project.name }}
     />
   )
 }

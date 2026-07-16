@@ -14,6 +14,10 @@ export type {
   BreakdownInsightInput,
   BreakdownRow,
 } from './derive'
-export type { Insight, InsightSource, InsightTone } from './types'
-export { AiUnavailableError, useAiInsights } from './useAiInsights'
-export type { AiInsightContext } from './useAiInsights'
+export type {
+  AiInsightContext,
+  Insight,
+  InsightSource,
+  InsightTone,
+} from './types'
+export type { InsightsProject } from './InsightsPanel'

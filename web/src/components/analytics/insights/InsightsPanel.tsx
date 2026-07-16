@@ -1,27 +1,28 @@
-import { Badge } from '@/components/ui/badge'
+import { useAiAssistant } from '@/components/ai/AiAssistantContext'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Loader2, RotateCcw, Sparkles } from 'lucide-react'
-import type { Insight, InsightTone } from './types'
-import { AiUnavailableError, useAiInsights } from './useAiInsights'
-import type { AiInsightContext } from './useAiInsights'
+import { Sparkles } from 'lucide-react'
+import type { AiInsightContext, Insight, InsightTone } from './types'
+
+/** The project the panel belongs to, for opening the AI chat dock. */
+export interface InsightsProject {
+  id: number
+  slug?: string
+  name: string
+}
 
 interface InsightsPanelProps {
   /** Stat insights derived from the page's data (see `derive.ts`). */
   insights: Insight[]
   isLoading?: boolean
   /**
-   * When set, the panel offers on-demand AI insight generation over this
-   * context. Omit to render a stats-only panel.
+   * When set (together with `project`), the panel offers an "Ask AI" action
+   * that opens the project's AI chat seeded with these stats. Omit to render
+   * a stats-only panel.
    */
   aiContext?: AiInsightContext
+  project?: InsightsProject
   emptyText?: string
 }
 
@@ -48,22 +49,11 @@ function InsightRow({ insight }: { insight: Insight }) {
           )}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {insight.source === 'ai' && (
-          <Badge
-            variant="secondary"
-            className="gap-1 py-0.5 pl-1.5 pr-2 font-normal"
-          >
-            <Sparkles className="size-3 shrink-0" />
-            AI
-          </Badge>
-        )}
-        {insight.value && (
-          <span className="text-sm font-semibold tabular-nums">
-            {insight.value}
-          </span>
-        )}
-      </div>
+      {insight.value && (
+        <span className="shrink-0 text-sm font-semibold tabular-nums">
+          {insight.value}
+        </span>
+      )}
     </li>
   )
 }
@@ -83,52 +73,71 @@ function RowSkeleton() {
   )
 }
 
+/** Opening prompt for the seeded analytics chat: narrate the visible stats. */
+function buildStartPrompt(context: AiInsightContext): string {
+  const range =
+    context.rangeStart && context.rangeEnd
+      ? ` between ${context.rangeStart} and ${context.rangeEnd}`
+      : ''
+  return [
+    `Here are the current web analytics stats for ${context.surface}${range}:`,
+    JSON.stringify(context.stats, null, 2),
+    'Give me 2-4 concrete insights: what stands out, what looks off, and one action worth taking. Ground every claim in the numbers above; use your tools if you need more detail.',
+  ].join('\n\n')
+}
+
 /**
  * Shared insights surface for analytics pages. Renders stat insights the
- * page derived from data it already has, plus — when `aiContext` is
- * provided — AI narrative insights generated on demand through the
- * install's AI gateway. AI rows are always labelled, never auto-run, and
- * failures state exactly what went wrong.
+ * page derived from data it already has. The "Ask AI" action opens the
+ * project's AI chat (assistant dock) seeded with the same stats — read-only
+ * chat is available by default; write actions stay behind the project's
+ * manual opt-in and per-action confirmation.
  */
 export function InsightsPanel({
   insights,
   isLoading,
   aiContext,
+  project,
   emptyText = 'Not enough data in this period to surface insights.',
 }: InsightsPanelProps) {
-  const ai = useAiInsights()
+  const { open: openAssistant } = useAiAssistant()
 
-  const aiInsights = ai.data ?? []
-  const rows = [...insights, ...aiInsights]
-  const aiErrorMessage = ai.error
-    ? ai.error instanceof AiUnavailableError || ai.error instanceof Error
-      ? ai.error.message
-      : 'The AI request failed. Try again.'
-    : null
+  // A plain project chat, seeded with the on-screen stats: each ask starts a
+  // fresh thread (uuid context id) and the model decides which of its tools
+  // to reach for from there — nothing analytics-specific is hardcoded.
+  const askAi =
+    aiContext && project
+      ? () =>
+          openAssistant({
+            projectId: project.id,
+            context: {
+              contextType: 'project',
+              contextId: crypto.randomUUID(),
+              title: `Analytics insights — ${aiContext.surface}`,
+              description:
+                'AI analyzes the analytics stats from this page. Ask follow-up questions to dig deeper.',
+              startPrompt: buildStartPrompt(aiContext),
+              projectSlug: project.slug,
+              projectName: project.name,
+            },
+          })
+      : undefined
 
   return (
     <Card>
       <CardHeader className="py-3">
         <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-sm font-medium">Insights</CardTitle>
-          {aiContext && (
+          {askAi && (
             <Button
               variant="outline"
               size="sm"
               className="h-7 shrink-0 gap-1.5"
-              disabled={isLoading || ai.isPending}
-              onClick={() => ai.mutate(aiContext)}
+              disabled={isLoading}
+              onClick={askAi}
             >
-              {ai.isPending ? (
-                <Loader2 className="size-4 shrink-0 animate-spin" />
-              ) : ai.data ? (
-                <RotateCcw className="size-4 shrink-0" />
-              ) : (
-                <Sparkles className="size-4 shrink-0" />
-              )}
-              <span className="hidden sm:inline">
-                {ai.data ? 'Regenerate' : 'AI insights'}
-              </span>
+              <Sparkles className="size-4 shrink-0" />
+              <span className="hidden sm:inline">Ask AI</span>
             </Button>
           )}
         </div>
@@ -140,33 +149,16 @@ export function InsightsPanel({
             <RowSkeleton />
             <RowSkeleton />
           </ul>
-        ) : rows.length === 0 && !ai.isPending && !aiErrorMessage ? (
+        ) : insights.length === 0 ? (
           <p className="px-4 pb-4 text-sm text-muted-foreground">{emptyText}</p>
         ) : (
           <ul role="list" className="divide-y">
-            {rows.map((insight) => (
+            {insights.map((insight) => (
               <InsightRow key={insight.id} insight={insight} />
             ))}
-            {ai.isPending && (
-              <>
-                <RowSkeleton />
-                <RowSkeleton />
-              </>
-            )}
-            {aiErrorMessage && !ai.isPending && (
-              <li className="px-4 py-2.5">
-                <p className="text-sm text-destructive">{aiErrorMessage}</p>
-              </li>
-            )}
           </ul>
         )}
       </CardContent>
-      {aiInsights.length > 0 && !ai.isPending && (
-        <CardFooter className="text-sm leading-none text-muted-foreground">
-          AI insights are generated from the stats on this page and may be
-          imprecise.
-        </CardFooter>
-      )}
     </Card>
   )
 }
