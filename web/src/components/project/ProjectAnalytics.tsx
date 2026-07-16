@@ -18,6 +18,7 @@ import {
   ReferrersChart,
   UTMCampaignsChart,
 } from '@/components/analytics/overview'
+import { OverviewInsights } from '@/components/analytics/insights'
 import { AiAgentsDetail } from '@/components/analytics/AiAgentsDetail'
 import { VisitorGlobePage } from '@/components/analytics/VisitorGlobe'
 import { LiveGlobePage } from '@/components/analytics/LiveGlobe'
@@ -1695,6 +1696,12 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
 
           {/* Analytics Metrics */}
           <AnalyticsMetrics
+            project={project}
+            startDate={startDate}
+            endDate={endDate}
+            environment={selectedEnvironment}
+          />
+          <OverviewInsights
             project={project}
             startDate={startDate}
             endDate={endDate}
