@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.49] - 2026-07-16
+
+### Added
+
+- **analytics:** Add insights panel with stat and AI insights
+- **analytics:** Put insights behind a compact toggle button
+- **ai-chat:** Default-on read-only chat; route analytics AI insights through project chat
+- **analytics:** Add raw event entries drill-down with JSON props view ([#359](https://github.com/gotempsh/temps/issues/359))
+- **settings:** Show web-console banner when a newer release is available ([#353](https://github.com/gotempsh/temps/issues/353))
+
+### Fixed
+
+- **analytics:** Harden AI insights prompt + warn on partial AI disable
+- **proxy:** Harden preview cookie session handling ([#361](https://github.com/gotempsh/temps/issues/361))
+
+### Miscellaneous
+
+- **web:** Replace rocketship logo assets with the t brand mark ([#358](https://github.com/gotempsh/temps/issues/358))
+
+### Performance
+
+- **metrics:** Time-bound external-service latest-metric queries ([#364](https://github.com/gotempsh/temps/issues/364))
+
 ## [0.1.0-beta.48] - 2026-07-15
 
 ### Added
