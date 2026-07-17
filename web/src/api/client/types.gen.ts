@@ -5411,7 +5411,6 @@ export type EmailStatsResponse = {
 
 export type EmailStatusResponse = {
     email_configured: boolean;
-    magic_link_available: boolean;
     oidc_providers: Array<OidcProviderSummary>;
     password_reset_available: boolean;
 };
@@ -8876,7 +8875,7 @@ export type LogsResponse = {
     data: Array<LogRecord>;
 };
 
-export type MagicLinkRequest = {
+export type EmailRequest = {
     email: string;
 };
 
@@ -21005,65 +21004,6 @@ export type LoginResponses = {
 
 export type LoginResponse = LoginResponses[keyof LoginResponses];
 
-export type RequestMagicLinkData = {
-    body: MagicLinkRequest;
-    path?: never;
-    query?: never;
-    url: '/auth/magic-link/request';
-};
-
-export type RequestMagicLinkErrors = {
-    /**
-     * Bad request
-     */
-    400: unknown;
-    /**
-     * Email service not configured
-     */
-    503: unknown;
-};
-
-export type RequestMagicLinkResponses = {
-    /**
-     * Magic link sent if email exists
-     */
-    200: AuthResponse;
-};
-
-export type RequestMagicLinkResponse = RequestMagicLinkResponses[keyof RequestMagicLinkResponses];
-
-export type VerifyMagicLinkData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Magic link token
-         */
-        token: string;
-    };
-    url: '/auth/magic-link/verify';
-};
-
-export type VerifyMagicLinkErrors = {
-    /**
-     * Invalid or expired token
-     */
-    400: unknown;
-    /**
-     * Internal server error
-     */
-    500: unknown;
-};
-
-export type VerifyMagicLinkResponses = {
-    /**
-     * Magic link verified, session cookie set
-     */
-    200: AuthResponse;
-};
-
-export type VerifyMagicLinkResponse = VerifyMagicLinkResponses[keyof VerifyMagicLinkResponses];
-
 export type OidcCallbackData = {
     body?: never;
     path?: never;
@@ -21118,7 +21058,7 @@ export type ListPublicProvidersResponses = {
 export type ListPublicProvidersResponse = ListPublicProvidersResponses[keyof ListPublicProvidersResponses];
 
 export type RequestPasswordResetData = {
-    body: MagicLinkRequest;
+    body: EmailRequest;
     path?: never;
     query?: never;
     url: '/auth/password-reset/request';
@@ -44710,7 +44650,7 @@ export type ChangePasswordSelfErrors = {
      */
     401: unknown;
     /**
-     * Account has no password set (SSO/magic-link only)
+     * Account has no password set (SSO-only)
      */
     403: unknown;
     /**
