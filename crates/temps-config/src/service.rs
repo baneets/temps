@@ -1,12 +1,13 @@
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseBackend, EntityTrait, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, FromQueryResult,
+    PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use temps_database::DbConnection;
-use temps_entities::settings;
+use temps_entities::{external_services, settings};
 use thiserror::Error;
 use tokio::{
     fs as tokio_fs,
@@ -60,6 +61,84 @@ pub enum ConfigServiceError {
         #[source]
         source: sea_orm::DbErr,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectiveTelemetryPolicies {
+    pub metrics_raw_days: Option<u32>,
+    pub metrics_hourly_days: Option<u32>,
+    pub metrics_daily_years: Option<u32>,
+    pub proxy_logs_compression_hours: Option<u32>,
+    pub otel_spans_compression_hours: Option<u32>,
+    pub proxy_logs_retention_days: Option<u32>,
+    pub otel_spans_retention_days: Option<u32>,
+    pub otel_logs_retention_days: Option<u32>,
+    pub otel_metrics_retention_days: Option<u32>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct TimescalePolicyRow {
+    hypertable_name: String,
+    proc_name: String,
+    interval_seconds: i64,
+}
+
+const SECONDS_PER_HOUR: i64 = 60 * 60;
+const SECONDS_PER_DAY: i64 = 24 * SECONDS_PER_HOUR;
+
+fn rounded_u32(value: i64, divisor: i64) -> Option<u32> {
+    if value <= 0 {
+        return None;
+    }
+    u32::try_from((value + divisor / 2) / divisor).ok()
+}
+
+fn policies_from_rows(rows: Vec<TimescalePolicyRow>) -> EffectiveTelemetryPolicies {
+    let mut policies = EffectiveTelemetryPolicies::default();
+
+    for row in rows {
+        let value = match row.proc_name.as_str() {
+            "policy_compression" => rounded_u32(row.interval_seconds, SECONDS_PER_HOUR),
+            "policy_retention" => rounded_u32(row.interval_seconds, SECONDS_PER_DAY),
+            _ => None,
+        };
+        let Some(value) = value else {
+            continue;
+        };
+
+        match (row.hypertable_name.as_str(), row.proc_name.as_str()) {
+            ("service_metrics", "policy_retention") => policies.metrics_raw_days = Some(value),
+            ("service_metrics_hourly", "policy_retention") => {
+                policies.metrics_hourly_days = Some(value)
+            }
+            ("service_metrics_daily", "policy_retention") => {
+                // The API represents this tier in whole years. Do not claim an
+                // arbitrary manually configured day count (for example 500
+                // days) is an exact year value. Leaving it unset falls back to
+                // the configured value, and the next save reconciles the drift.
+                if value % 365 == 0 {
+                    policies.metrics_daily_years = Some(value / 365);
+                }
+            }
+            ("proxy_logs", "policy_compression") => {
+                policies.proxy_logs_compression_hours = Some(value)
+            }
+            ("otel_spans", "policy_compression") => {
+                policies.otel_spans_compression_hours = Some(value)
+            }
+            ("proxy_logs", "policy_retention") => policies.proxy_logs_retention_days = Some(value),
+            ("otel_spans", "policy_retention") => policies.otel_spans_retention_days = Some(value),
+            ("otel_log_events", "policy_retention") => {
+                policies.otel_logs_retention_days = Some(value)
+            }
+            ("otel_metrics", "policy_retention") => {
+                policies.otel_metrics_retention_days = Some(value)
+            }
+            _ => {}
+        }
+    }
+
+    policies
 }
 
 fn compression_policy_sql(table: &'static str, after_hours: u32) -> String {
@@ -541,6 +620,63 @@ impl ConfigService {
         matches!(self.get_database_backend(), DatabaseBackend::Postgres)
     }
 
+    /// Read the active TimescaleDB retention/compression durations in one
+    /// metadata query. This view contains one row per background policy, so
+    /// the query does not scan telemetry data or hypertable chunks.
+    pub async fn get_effective_telemetry_policies(
+        &self,
+    ) -> Result<EffectiveTelemetryPolicies, ConfigServiceError> {
+        if !self.is_postgres() {
+            return Ok(EffectiveTelemetryPolicies::default());
+        }
+
+        let rows = TimescalePolicyRow::find_by_statement(Statement::from_string(
+            DatabaseBackend::Postgres,
+            r#"
+SELECT
+    hypertable_name,
+    proc_name,
+    EXTRACT(
+        EPOCH FROM (
+            CASE proc_name
+                WHEN 'policy_compression' THEN config ->> 'compress_after'
+                WHEN 'policy_retention' THEN config ->> 'drop_after'
+            END
+        )::interval
+    )::BIGINT AS interval_seconds
+FROM timescaledb_information.jobs
+WHERE proc_name IN ('policy_compression', 'policy_retention')
+  AND hypertable_schema = current_schema()
+  AND hypertable_name IN (
+      'service_metrics',
+      'service_metrics_hourly',
+      'service_metrics_daily',
+      'proxy_logs',
+      'otel_spans',
+      'otel_log_events',
+      'otel_metrics'
+  )
+"#
+            .to_owned(),
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        Ok(policies_from_rows(rows))
+    }
+
+    /// Count exactly the services the MetricsScraper will include in its next
+    /// cycle. This is a COUNT over the control-plane service table, not a scan
+    /// of metric samples.
+    pub async fn count_monitored_services(&self) -> Result<u64, ConfigServiceError> {
+        external_services::Entity::find()
+            .filter(external_services::Column::MetricsEnabled.eq(true))
+            .filter(external_services::Column::Status.eq("running"))
+            .count(self.db.as_ref())
+            .await
+            .map_err(ConfigServiceError::from)
+    }
+
     /// Check if using MySQL/MariaDB database
     pub fn is_mysql(&self) -> bool {
         matches!(self.get_database_backend(), DatabaseBackend::MySql)
@@ -693,6 +829,23 @@ impl ConfigService {
     pub async fn update_settings(&self, settings: AppSettings) -> Result<(), ConfigServiceError> {
         let now = Utc::now();
 
+        // The settings row can drift from the actual TimescaleDB jobs (for
+        // example after a manual policy change). Prefer the live, tiny policy
+        // snapshot when deciding what must be replaced. If metadata is
+        // temporarily unavailable, retain the previous settings comparison so
+        // unrelated settings can still be saved.
+        let effective_policies = if self.is_postgres() {
+            match self.get_effective_telemetry_policies().await {
+                Ok(policies) => Some(policies),
+                Err(error) => {
+                    warn!(%error, "Failed to read active TimescaleDB policies before settings update");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Persist the settings and replace changed TimescaleDB policies in one
         // transaction. A policy error therefore cannot leave the API reporting
         // a delay that the database did not actually apply (or vice versa).
@@ -709,14 +862,67 @@ impl ConfigService {
             .as_ref()
             .map(|model| AppSettings::from_json(model.data.clone()).observability_retention)
             .unwrap_or_default();
+        let previous_monitoring = existing
+            .as_ref()
+            .map(|model| AppSettings::from_json(model.data.clone()).monitoring)
+            .unwrap_or_default();
 
         if self.db.get_database_backend() == DatabaseBackend::Postgres {
+            let monitoring = &settings.monitoring;
+            let metric_policies = [
+                (
+                    "service_metrics",
+                    monitoring.retention_raw_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.metrics_raw_days)
+                        .unwrap_or(Some(previous_monitoring.retention_raw_days)),
+                ),
+                (
+                    "service_metrics_hourly",
+                    monitoring.retention_hourly_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.metrics_hourly_days)
+                        .unwrap_or(Some(previous_monitoring.retention_hourly_days)),
+                ),
+                (
+                    "service_metrics_daily",
+                    monitoring.retention_daily_years.saturating_mul(365),
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| {
+                            policies
+                                .metrics_daily_years
+                                .map(|years| years.saturating_mul(365))
+                        })
+                        .unwrap_or(Some(
+                            previous_monitoring
+                                .retention_daily_years
+                                .saturating_mul(365),
+                        )),
+                ),
+            ];
+            for (table, after_days, previous_days) in metric_policies {
+                if Some(after_days) != previous_days {
+                    replace_retention_policy(&txn, table, after_days).await?;
+                }
+            }
+
             let compression = &settings.observability_compression;
-            if compression.proxy_logs_after_hours != previous_compression.proxy_logs_after_hours {
+            let proxy_logs_compression_hours = effective_policies
+                .as_ref()
+                .map(|policies| policies.proxy_logs_compression_hours)
+                .unwrap_or(Some(previous_compression.proxy_logs_after_hours));
+            if Some(compression.proxy_logs_after_hours) != proxy_logs_compression_hours {
                 replace_compression_policy(&txn, "proxy_logs", compression.proxy_logs_after_hours)
                     .await?;
             }
-            if compression.otel_spans_after_hours != previous_compression.otel_spans_after_hours {
+            let otel_spans_compression_hours = effective_policies
+                .as_ref()
+                .map(|policies| policies.otel_spans_compression_hours)
+                .unwrap_or(Some(previous_compression.otel_spans_after_hours));
+            if Some(compression.otel_spans_after_hours) != otel_spans_compression_hours {
                 replace_compression_policy(&txn, "otel_spans", compression.otel_spans_after_hours)
                     .await?;
             }
@@ -726,26 +932,38 @@ impl ConfigService {
                 (
                     "proxy_logs",
                     retention.proxy_logs_days,
-                    previous_retention.proxy_logs_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.proxy_logs_retention_days)
+                        .unwrap_or(Some(previous_retention.proxy_logs_days)),
                 ),
                 (
                     "otel_spans",
                     retention.otel_spans_days,
-                    previous_retention.otel_spans_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.otel_spans_retention_days)
+                        .unwrap_or(Some(previous_retention.otel_spans_days)),
                 ),
                 (
                     "otel_log_events",
                     retention.otel_logs_days,
-                    previous_retention.otel_logs_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.otel_logs_retention_days)
+                        .unwrap_or(Some(previous_retention.otel_logs_days)),
                 ),
                 (
                     "otel_metrics",
                     retention.otel_metrics_days,
-                    previous_retention.otel_metrics_days,
+                    effective_policies
+                        .as_ref()
+                        .map(|policies| policies.otel_metrics_retention_days)
+                        .unwrap_or(Some(previous_retention.otel_metrics_days)),
                 ),
             ];
             for (table, after_days, previous_days) in policies {
-                if after_days != previous_days {
+                if Some(after_days) != previous_days {
                     replace_retention_policy(&txn, table, after_days).await?;
                 }
             }
@@ -1081,7 +1299,8 @@ impl Drop for ConfigService {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, Value};
+    use std::collections::BTreeMap;
 
     fn test_config() -> Arc<ServerConfig> {
         Arc::new(
@@ -1108,6 +1327,31 @@ mod tests {
         }
     }
 
+    fn timescale_policy_row(
+        hypertable_name: &str,
+        proc_name: &str,
+        interval_seconds: i64,
+    ) -> BTreeMap<String, Value> {
+        BTreeMap::from([
+            (
+                "hypertable_name".to_string(),
+                Value::String(Some(Box::new(hypertable_name.to_string()))),
+            ),
+            (
+                "proc_name".to_string(),
+                Value::String(Some(Box::new(proc_name.to_string()))),
+            ),
+            (
+                "interval_seconds".to_string(),
+                Value::BigInt(Some(interval_seconds)),
+            ),
+        ])
+    }
+
+    fn count_row(count: i64) -> BTreeMap<String, Value> {
+        BTreeMap::from([("num_items".to_string(), Value::BigInt(Some(count)))])
+    }
+
     #[test]
     fn compression_policy_sql_uses_an_integer_interval_and_idempotent_replace() {
         let sql = compression_policy_sql("proxy_logs", 24);
@@ -1122,6 +1366,154 @@ mod tests {
         assert!(sql.contains("remove_retention_policy('otel_spans', if_exists => TRUE)"));
         assert!(sql.contains("make_interval(days => 90)"));
         assert!(sql.contains("if_not_exists => TRUE"));
+    }
+
+    #[test]
+    fn timescale_policy_rows_map_to_ui_units() {
+        let rows = vec![
+            TimescalePolicyRow {
+                hypertable_name: "service_metrics".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 14 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "service_metrics_hourly".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 90 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "service_metrics_daily".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 730 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "proxy_logs".into(),
+                proc_name: "policy_compression".into(),
+                interval_seconds: 24 * SECONDS_PER_HOUR,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "otel_spans".into(),
+                proc_name: "policy_compression".into(),
+                interval_seconds: 12 * SECONDS_PER_HOUR,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "proxy_logs".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 30 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "otel_spans".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 60 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "otel_log_events".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 45 * SECONDS_PER_DAY,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "otel_metrics".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 90 * SECONDS_PER_DAY,
+            },
+        ];
+
+        assert_eq!(
+            policies_from_rows(rows),
+            EffectiveTelemetryPolicies {
+                metrics_raw_days: Some(14),
+                metrics_hourly_days: Some(90),
+                metrics_daily_years: Some(2),
+                proxy_logs_compression_hours: Some(24),
+                otel_spans_compression_hours: Some(12),
+                proxy_logs_retention_days: Some(30),
+                otel_spans_retention_days: Some(60),
+                otel_logs_retention_days: Some(45),
+                otel_metrics_retention_days: Some(90),
+            }
+        );
+    }
+
+    #[test]
+    fn timescale_policy_rows_ignore_unknown_or_non_positive_intervals() {
+        let rows = vec![
+            TimescalePolicyRow {
+                hypertable_name: "proxy_logs".into(),
+                proc_name: "policy_compression".into(),
+                interval_seconds: 0,
+            },
+            TimescalePolicyRow {
+                hypertable_name: "unknown_table".into(),
+                proc_name: "policy_retention".into(),
+                interval_seconds: 30 * SECONDS_PER_DAY,
+            },
+        ];
+
+        assert_eq!(
+            policies_from_rows(rows),
+            EffectiveTelemetryPolicies::default()
+        );
+    }
+
+    #[test]
+    fn timescale_policy_rows_do_not_round_partial_years() {
+        let policies = policies_from_rows(vec![TimescalePolicyRow {
+            hypertable_name: "service_metrics_daily".into(),
+            proc_name: "policy_retention".into(),
+            interval_seconds: 500 * SECONDS_PER_DAY,
+        }]);
+
+        assert_eq!(policies.metrics_daily_years, None);
+    }
+
+    #[tokio::test]
+    async fn effective_policy_query_reads_timescale_metadata_without_telemetry_scan() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([[
+                    timescale_policy_row("proxy_logs", "policy_compression", 24 * SECONDS_PER_HOUR),
+                    timescale_policy_row("otel_metrics", "policy_retention", 90 * SECONDS_PER_DAY),
+                ]])
+                .into_connection(),
+        );
+        let svc = ConfigService::new(test_config(), db.clone());
+
+        let policies = svc
+            .get_effective_telemetry_policies()
+            .await
+            .expect("Timescale metadata query should map active jobs");
+
+        assert_eq!(policies.proxy_logs_compression_hours, Some(24));
+        assert_eq!(policies.otel_metrics_retention_days, Some(90));
+        drop(svc);
+        let statements = Arc::try_unwrap(db)
+            .expect("test should release database connection")
+            .into_transaction_log();
+        let sql = statements[0].statements()[0].to_string();
+        assert!(sql.contains("timescaledb_information.jobs"));
+        assert!(sql.contains("hypertable_schema = current_schema()"));
+        assert!(!sql.contains("FROM proxy_logs"));
+        assert!(!sql.contains("FROM otel_metrics"));
+    }
+
+    #[tokio::test]
+    async fn monitored_service_count_matches_scraper_predicates() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([[count_row(4)]])
+                .into_connection(),
+        );
+        let svc = ConfigService::new(test_config(), db.clone());
+
+        assert_eq!(svc.count_monitored_services().await.unwrap(), 4);
+        drop(svc);
+        let statements = Arc::try_unwrap(db)
+            .expect("test should release database connection")
+            .into_transaction_log();
+        let sql = statements[0].statements()[0].to_string();
+        assert!(sql.contains("metrics_enabled"));
+        assert!(sql.contains("status"));
+        assert!(sql.contains("running"));
     }
 
     // The proxy reads settings on the per-request hot path, so get_settings()
@@ -1157,6 +1549,7 @@ mod tests {
         // get_settings, then update_settings' existence check, plus slack.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results(vec![
+                vec![settings_row("old.example.com")],
                 vec![settings_row("old.example.com")],
                 vec![settings_row("old.example.com")],
                 vec![settings_row("old.example.com")],
@@ -1235,6 +1628,90 @@ mod tests {
             cached.observability_compression,
             updated.observability_compression
         );
+    }
+
+    #[tokio::test]
+    async fn update_settings_recreates_a_missing_live_policy_even_when_json_matches() {
+        let current = AppSettings::default();
+        let live_rows = vec![
+            timescale_policy_row(
+                "service_metrics",
+                "policy_retention",
+                i64::from(current.monitoring.retention_raw_days) * SECONDS_PER_DAY,
+            ),
+            timescale_policy_row(
+                "service_metrics_hourly",
+                "policy_retention",
+                i64::from(current.monitoring.retention_hourly_days) * SECONDS_PER_DAY,
+            ),
+            timescale_policy_row(
+                "service_metrics_daily",
+                "policy_retention",
+                i64::from(current.monitoring.retention_daily_years) * 365 * SECONDS_PER_DAY,
+            ),
+            // proxy_logs compression is intentionally missing.
+            timescale_policy_row(
+                "otel_spans",
+                "policy_compression",
+                i64::from(current.observability_compression.otel_spans_after_hours)
+                    * SECONDS_PER_HOUR,
+            ),
+            timescale_policy_row(
+                "proxy_logs",
+                "policy_retention",
+                i64::from(current.observability_retention.proxy_logs_days) * SECONDS_PER_DAY,
+            ),
+            timescale_policy_row(
+                "otel_spans",
+                "policy_retention",
+                i64::from(current.observability_retention.otel_spans_days) * SECONDS_PER_DAY,
+            ),
+            timescale_policy_row(
+                "otel_log_events",
+                "policy_retention",
+                i64::from(current.observability_retention.otel_logs_days) * SECONDS_PER_DAY,
+            ),
+            timescale_policy_row(
+                "otel_metrics",
+                "policy_retention",
+                i64::from(current.observability_retention.otel_metrics_days) * SECONDS_PER_DAY,
+            ),
+        ];
+        let row = settings_row("localhost");
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([live_rows])
+                .append_query_results([[row.clone()], [row]])
+                .append_exec_results([
+                    sea_orm::MockExecResult {
+                        last_insert_id: 0,
+                        rows_affected: 1,
+                    },
+                    sea_orm::MockExecResult {
+                        last_insert_id: 1,
+                        rows_affected: 1,
+                    },
+                ])
+                .into_connection(),
+        );
+        let svc = ConfigService::new(test_config(), db.clone());
+
+        svc.update_settings(current)
+            .await
+            .expect("missing live policy should be recreated");
+
+        drop(svc);
+        let statements = Arc::try_unwrap(db)
+            .expect("test should release database connection")
+            .into_transaction_log();
+        let sql = statements
+            .iter()
+            .flat_map(|transaction| transaction.statements())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sql.contains("add_compression_policy"));
+        assert!(sql.contains("proxy_logs"));
     }
 
     #[tokio::test]
