@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Email SNS webhook security and durability**: SES notifications now require an exact topic ARN configured on the active SES provider, validate AWS confirmation/certificate endpoints, correlate recipients and provider ownership, commit events and domain-scoped suppressions atomically, and deduplicate retries before acknowledging SNS. Upgrades preserve legacy global suppression safety by copying those entries to every existing sending domain, then enforce tenant-scoped ownership for future changes.
+- **No-op visitor deduplication migration**: `m20260705_000001_add_visitor_unique_index` now skips bulk foreign-key rewrites when no duplicate `(visitor_id, project_id)` pairs exist, preventing TimescaleDB from eagerly decompressing unrelated hypertable chunks and exceeding `timescaledb.max_tuples_decompressed_per_dml_transaction` during upgrades.
 - **core:** Resolve request IP trust-awarely for audit/logging ([#363](https://github.com/gotempsh/temps/issues/363))
 - **skill:** Remove piped shell install and explicit credential paths from docs ([#365](https://github.com/gotempsh/temps/issues/365))
 - **deployments:** Emit deploy_succeeded telemetry on the real success path ([#372](https://github.com/gotempsh/temps/issues/372))

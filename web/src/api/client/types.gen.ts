@@ -1026,6 +1026,16 @@ export type AppSettings = {
      */
     monitoring?: MonitoringSettings;
     multi_node?: MultiNodeSettings;
+    /**
+     * TimescaleDB compression delays for immutable observability data.
+     * Changes are applied at runtime by the Settings API.
+     */
+    observability_compression?: ObservabilityCompressionSettings;
+    /**
+     * Retention windows for raw proxy and OpenTelemetry telemetry.
+     * TimescaleDB policies are updated at runtime by the Settings API.
+     */
+    observability_retention?: ObservabilityRetentionSettings;
     on_demand_tls?: OnDemandTlsSettings;
     preview_domain?: string;
     preview_gateway?: PreviewGatewaySettings;
@@ -1092,21 +1102,29 @@ export type AppSettingsResponse = {
     effective_metrics_store: MetricsStoreKind;
     /**
      * Storage backend actually used for proxy logs, OTel spans, and OTel
-     * metrics. OTel logs remain TimescaleDB-backed.
+     * metrics. OTel logs remain TimescaleDB-backed. Unlike resource metrics,
+     * these domains switch to ClickHouse whenever the server-level ClickHouse
+     * connection is configured; they do not use the monitoring store toggle.
      */
     effective_observability_store: MetricsStoreKind;
     external_url?: string | null;
     insecure_tls: boolean;
     internal_url?: string | null;
     letsencrypt: LetsEncryptSettings;
-    monitoring: MonitoringSettingsMasked;
     /**
-     * Number of enabled, running services included in the metrics scrape
-     * cycle. Null when the count could not be loaded.
+     * Number of enabled, running services the MetricsScraper currently
+     * includes. Used for the lightweight storage estimate in the UI.
      */
-    monitored_services_count: number | null;
+    monitored_services_count?: number | null;
+    monitoring: MonitoringSettingsMasked;
     multi_node: MultiNodeSettingsMasked;
+    /**
+     * TimescaleDB compression delays for immutable proxy logs and OTel spans.
+     */
     observability_compression: ObservabilityCompressionSettings;
+    /**
+     * Retention windows for raw proxy logs and OpenTelemetry data.
+     */
     observability_retention: ObservabilityRetentionSettings;
     preview_domain: string;
     preview_gateway: PreviewGatewaySettingsMasked;
@@ -2202,10 +2220,7 @@ export type CmdResponse = {
 };
 
 export type CommitExistsResponse = {
-    /**
-     * Commit metadata when the requested SHA exists.
-     */
-    commit?: CommitInfo | null;
+    commit?: null | CommitInfo;
     commit_sha?: string | null;
     exists: boolean;
 };
@@ -3067,6 +3082,10 @@ export type CreateEmailProviderRequest = {
     scaleway_credentials?: null | ScalewayCredentialsRequest;
     ses_credentials?: null | SesCredentialsRequest;
     smtp_credentials?: null | SmtpCredentialsRequest;
+    /**
+     * Exact SNS topic allowed to deliver SES events for this provider.
+     */
+    sns_topic_arn?: string | null;
 };
 
 export type CreateEnvironmentRequest = {
@@ -5345,10 +5364,18 @@ export type EmailProviderResponse = {
     name: string;
     provider_type: EmailProviderTypeRoute;
     region: string;
+    sns_topic_arn?: string | null;
     updated_at: string;
 };
 
 export type EmailProviderTypeRoute = 'ses' | 'scaleway' | 'smtp';
+
+/**
+ * Request body carrying just an email address (password-reset request).
+ */
+export type EmailRequest = {
+    email: string;
+};
 
 export type EmailResponse = {
     bcc_addresses?: Array<string> | null;
@@ -5433,6 +5460,52 @@ export type EmailTrackingResponse = {
     track_opens: boolean;
     unique_clicks: number;
     unique_opens: number;
+};
+
+/**
+ * Result of the one-click AWS-side event-tracking setup.
+ */
+export type EmailTrackingSetupResponse = {
+    /**
+     * The SESv2 event destination (bounce/complaint/delivery) is attached
+     * to the `temps-tracking` configuration set.
+     */
+    event_destination_attached: boolean;
+    /**
+     * The webhook subscription was requested; SNS confirms it
+     * asynchronously through the webhook itself.
+     */
+    subscription_requested: boolean;
+    topic_arn: string;
+    webhook_url: string;
+};
+
+/**
+ * Live status of the SES event-tracking pipeline for one provider.
+ */
+export type EmailTrackingStatusResponse = {
+    /**
+     * Most recent delivered/bounced/complained event recorded for an email
+     * sent through this provider. `null` means no provider feedback has
+     * arrived yet.
+     */
+    last_event_at?: string | null;
+    sns_topic_arn?: string | null;
+    /**
+     * When the SNS subscription for the current topic was confirmed.
+     * `null` with a topic set usually means the subscription is still
+     * pending — most often because the endpoint was subscribed before the
+     * topic ARN was saved here.
+     */
+    subscription_confirmed_at?: string | null;
+    /**
+     * Only SES providers support SNS event tracking.
+     */
+    supports_event_tracking: boolean;
+    /**
+     * Public webhook endpoint SNS must deliver events to.
+     */
+    webhook_url: string;
 };
 
 export type EmbeddingData = {
@@ -8879,10 +8952,6 @@ export type LogsResponse = {
     data: Array<LogRecord>;
 };
 
-export type EmailRequest = {
-    email: string;
-};
-
 /**
  * Managed domain response
  */
@@ -9479,24 +9548,6 @@ export type MonitoringSettingsMasked = {
     store: MetricsStoreKind;
 };
 
-export type ObservabilityCompressionSettings = {
-    /** Compress OpenTelemetry span chunks after this many hours. */
-    otel_spans_after_hours: number;
-    /** Compress proxy-log chunks after this many hours. */
-    proxy_logs_after_hours: number;
-};
-
-export type ObservabilityRetentionSettings = {
-    /** OpenTelemetry log-event retention in days. */
-    otel_logs_days: number;
-    /** OpenTelemetry metric-point retention in days. */
-    otel_metrics_days: number;
-    /** OpenTelemetry span/trace retention in days. */
-    otel_spans_days: number;
-    /** Raw proxy request-log retention in days. */
-    proxy_logs_days: number;
-};
-
 export type MrrBucketResponse = {
     bucket: string;
     charge_count: number;
@@ -9753,6 +9804,23 @@ export type NotificationProviderResponse = {
 };
 
 /**
+ * TimescaleDB compression policy configuration for append-only observability
+ * tables. Values are expressed in hours so operators can choose sub-day
+ * windows while keeping the API representation unambiguous.
+ */
+export type ObservabilityCompressionSettings = {
+    /**
+     * Compress OpenTelemetry span chunks after this many hours. Defaults to
+     * 24 hours.
+     */
+    otel_spans_after_hours?: number;
+    /**
+     * Compress proxy-log chunks after this many hours. Defaults to 24 hours.
+     */
+    proxy_logs_after_hours?: number;
+};
+
+/**
  * Discriminated union of every row that can appear in the Observe list.
  *
  * Serializes to `{ "type": "request" | "span" | ... , ...rest }` so the UI
@@ -9774,6 +9842,30 @@ export type ObservabilityEvent = (RequestRow & {
 }) | (RevenueRow & {
     type: 'revenue';
 });
+
+/**
+ * Retention policy configuration for raw observability tables. Values are in
+ * days. The Settings API applies them to TimescaleDB; ClickHouse-backed proxy
+ * logs and spans retain their storage-level per-row TTL behavior.
+ */
+export type ObservabilityRetentionSettings = {
+    /**
+     * Retain OpenTelemetry log events for this many days.
+     */
+    otel_logs_days?: number;
+    /**
+     * Retain OpenTelemetry metric points for this many days.
+     */
+    otel_metrics_days?: number;
+    /**
+     * Retain OpenTelemetry spans (traces) for this many days.
+     */
+    otel_spans_days?: number;
+    /**
+     * Retain proxy request logs for this many days.
+     */
+    proxy_logs_days?: number;
+};
 
 export type OidcProviderResponse = {
     client_id: string;
@@ -16032,6 +16124,11 @@ export type UpdateEmailProviderRequest = {
     scaleway_credentials?: null | ScalewayCredentialsRequest;
     ses_credentials?: null | SesCredentialsRequest;
     smtp_credentials?: null | SmtpCredentialsRequest;
+    /**
+     * Rotate or clear the exact SNS topic allowed for this SES provider.
+     * Omit to preserve it, send `null` to clear it, or send a string to set it.
+     */
+    sns_topic_arn?: string | null;
 };
 
 export type UpdateEnvironmentSettingsRequest = {
@@ -24681,6 +24778,86 @@ export type TestProviderResponses = {
 };
 
 export type TestProviderResponse2 = TestProviderResponses[keyof TestProviderResponses];
+
+export type SetupEmailTrackingData = {
+    body?: never;
+    path: {
+        /**
+         * Provider ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/email-providers/{id}/tracking/setup';
+};
+
+export type SetupEmailTrackingErrors = {
+    /**
+     * Provider does not support event tracking
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Provider not found
+     */
+    404: unknown;
+    /**
+     * An AWS call failed — the response detail names the failed step
+     */
+    502: unknown;
+};
+
+export type SetupEmailTrackingResponses = {
+    /**
+     * Setup completed
+     */
+    200: EmailTrackingSetupResponse;
+};
+
+export type SetupEmailTrackingResponse = SetupEmailTrackingResponses[keyof SetupEmailTrackingResponses];
+
+export type GetEmailTrackingStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Provider ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/email-providers/{id}/tracking/status';
+};
+
+export type GetEmailTrackingStatusErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Provider not found
+     */
+    404: unknown;
+};
+
+export type GetEmailTrackingStatusResponses = {
+    /**
+     * Event tracking status
+     */
+    200: EmailTrackingStatusResponse;
+};
+
+export type GetEmailTrackingStatusResponse = GetEmailTrackingStatusResponses[keyof GetEmailTrackingStatusResponses];
 
 export type ListEmailsData = {
     body?: never;
@@ -43165,6 +43342,10 @@ export type CheckCommitExistsData = {
 
 export type CheckCommitExistsErrors = {
     /**
+     * Invalid commit SHA
+     */
+    400: unknown;
+    /**
      * Unauthorized
      */
     401: unknown;
@@ -43172,6 +43353,10 @@ export type CheckCommitExistsErrors = {
      * Repository not found
      */
     404: unknown;
+    /**
+     * Commit lookup rate limit exceeded
+     */
+    429: unknown;
     /**
      * Internal server error
      */
@@ -44658,7 +44843,7 @@ export type ChangePasswordSelfErrors = {
      */
     401: unknown;
     /**
-     * Account has no password set (SSO-only)
+     * Account has no password set (SSO only)
      */
     403: unknown;
     /**
