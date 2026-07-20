@@ -19,23 +19,31 @@ import type {
 // idiomatic camelCase at the boundary without the generated types
 // leaking snake_case into user code.
 
-interface WireSandbox {
+// `SandboxInner` on the server (`@vercel/sandbox`-shaped): camelCase core
+// fields, `cwd` for the work dir, epoch-ms timestamps, `timeout` in ms.
+interface WireSandboxInner {
   id: string;
   name: string;
   status: string;
   image: string | null;
-  work_dir: string;
-  created_at: string;
-  expires_at: string;
+  cwd: string;
+  /** Creation time, Unix epoch milliseconds. */
+  createdAt: number;
+  /** Idle timeout in milliseconds. */
+  timeout: number;
   preview_url_template: string;
   preview_password_hint?: string;
 }
 
+/** Create/get responses wrap the sandbox with its preview routes. */
+interface WireSandboxEnvelope {
+  sandbox: WireSandboxInner;
+  routes?: unknown[];
+}
+
 interface WireListSandboxes {
-  items: WireSandbox[];
-  total: number;
-  page: number;
-  page_size: number;
+  sandboxes: WireSandboxInner[];
+  pagination: { count: number; next: string | null; prev: string | null };
 }
 
 interface WireExecResult {
@@ -60,15 +68,15 @@ interface WireStat {
   size: number;
 }
 
-function toSummary(w: WireSandbox): SandboxSummary {
+function toSummary(w: WireSandboxInner): SandboxSummary {
   return {
     id: w.id,
     name: w.name,
     status: w.status,
     image: w.image,
-    workDir: w.work_dir,
-    createdAt: w.created_at,
-    expiresAt: w.expires_at,
+    workDir: w.cwd,
+    createdAt: new Date(w.createdAt).toISOString(),
+    expiresAt: new Date(w.createdAt + w.timeout).toISOString(),
     previewUrlTemplate: w.preview_url_template,
     previewPasswordHint: w.preview_password_hint,
   };
@@ -85,6 +93,7 @@ function toCreateBody(opts: CreateSandboxOptions): Record<string, unknown> {
     pids_limit: opts.pidsLimit,
     source: opts.source ? toSourceBody(opts.source) : undefined,
     preview_password: opts.previewPassword,
+    backend: opts.backend,
   };
 }
 
@@ -154,20 +163,24 @@ export class Sandbox {
   ): Promise<Sandbox> {
     const { apiUrl, apiToken, fetch, ...opts } = config;
     const cfg = resolveConfig({ apiUrl, apiToken, fetch });
-    const wire = await request<WireSandbox>(
+    const wire = await request<WireSandboxEnvelope>(
       cfg,
       'POST',
-      '/v1/sandbox',
+      '/v1/sandboxes',
       toCreateBody(opts)
     );
-    return new Sandbox(toSummary(wire), cfg);
+    return new Sandbox(toSummary(wire.sandbox), cfg);
   }
 
   /** Fetch an existing sandbox by ID. */
   static async get(id: string, config: SandboxConfig = {}): Promise<Sandbox> {
     const cfg = resolveConfig(config);
-    const wire = await request<WireSandbox>(cfg, 'GET', `/v1/sandbox/${id}`);
-    return new Sandbox(toSummary(wire), cfg);
+    const wire = await request<WireSandboxEnvelope>(
+      cfg,
+      'GET',
+      `/v1/sandboxes/${id}`
+    );
+    return new Sandbox(toSummary(wire.sandbox), cfg);
   }
 
   /** Page through the caller's sandboxes. */
@@ -179,27 +192,27 @@ export class Sandbox {
     const wire = await request<WireListSandboxes>(
       cfg,
       'GET',
-      '/v1/sandbox',
+      '/v1/sandboxes',
       undefined,
       { page, page_size: pageSize }
     );
     return {
-      items: wire.items.map(toSummary),
-      total: wire.total,
-      page: wire.page,
-      pageSize: wire.page_size,
+      items: wire.sandboxes.map(toSummary),
+      total: wire.pagination.count,
+      page: page ?? 1,
+      pageSize: pageSize ?? 20,
     };
   }
 
   // ── Instance methods ──
 
   async refresh(): Promise<SandboxSummary> {
-    const wire = await request<WireSandbox>(
+    const wire = await request<WireSandboxEnvelope>(
       this.cfg,
       'GET',
-      `/v1/sandbox/${this.id}`
+      `/v1/sandboxes/${this.id}`
     );
-    this.summary = toSummary(wire);
+    this.summary = toSummary(wire.sandbox);
     return this.summary;
   }
 
@@ -212,7 +225,7 @@ export class Sandbox {
     const wire = await request<WireExecResult>(
       this.cfg,
       'POST',
-      `/v1/sandbox/${this.id}/exec`,
+      `/v1/sandboxes/${this.id}/exec`,
       { cmd, env: options.env, cwd: options.cwd }
     );
     return {
@@ -230,7 +243,7 @@ export class Sandbox {
     const wire = await request<{ job_id: string }>(
       this.cfg,
       'POST',
-      `/v1/sandbox/${this.id}/exec-detached`,
+      `/v1/sandboxes/${this.id}/exec-detached`,
       { cmd, env: options.env, cwd: options.cwd }
     );
     return { jobId: wire.job_id };
@@ -240,7 +253,7 @@ export class Sandbox {
     const wire = await request<WireJobStatus>(
       this.cfg,
       'GET',
-      `/v1/sandbox/${this.id}/jobs/${jobId}`
+      `/v1/sandboxes/${this.id}/jobs/${jobId}`
     );
     return {
       status: wire.status,
@@ -255,13 +268,13 @@ export class Sandbox {
     await request<void>(
       this.cfg,
       'POST',
-      `/v1/sandbox/${this.id}/jobs/${jobId}/kill`,
+      `/v1/sandboxes/${this.id}/jobs/${jobId}/kill`,
       signal ? { signal } : undefined
     );
   }
 
   async writeFile(opts: WriteFileOptions): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/fs/write`, {
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/fs/write`, {
       path: opts.path,
       contents_b64: toBase64(opts.contents),
       mode: opts.mode,
@@ -272,7 +285,7 @@ export class Sandbox {
     const wire = await request<{ path: string; contents_b64: string; size: number }>(
       this.cfg,
       'GET',
-      `/v1/sandbox/${this.id}/fs/read`,
+      `/v1/sandboxes/${this.id}/fs/read`,
       undefined,
       { path }
     );
@@ -280,7 +293,7 @@ export class Sandbox {
   }
 
   async mkdir(path: string): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/fs/mkdir`, {
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/fs/mkdir`, {
       path,
     });
   }
@@ -289,7 +302,7 @@ export class Sandbox {
     const wire = await request<WireStat>(
       this.cfg,
       'GET',
-      `/v1/sandbox/${this.id}/fs/stat`,
+      `/v1/sandboxes/${this.id}/fs/stat`,
       undefined,
       { path }
     );
@@ -317,31 +330,31 @@ export class Sandbox {
     await request<void>(
       this.cfg,
       'POST',
-      `/v1/sandbox/${this.id}/extend-timeout`,
+      `/v1/sandboxes/${this.id}/extend-timeout`,
       { extra_secs: extraSecs }
     );
   }
 
   async pause(): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/pause`);
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/pause`);
   }
 
   async resume(): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/resume`);
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/resume`);
   }
 
   async restart(): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/restart`);
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/restart`);
   }
 
   /** Stop the container but keep the row (can `resume` later). */
   async stop(): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/stop`);
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/stop`);
   }
 
   /** Stop **and** delete the sandbox. Irreversible. */
   async destroy(): Promise<void> {
-    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/destroy`);
+    await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/destroy`);
   }
 }
 

@@ -13094,8 +13094,10 @@ export type SandboxDomainResponse = {
  * the SDK's zod validator rejects missing required fields.
  */
 export type SandboxInner = {
+    backend?: string | null;
     createdAt: number;
     cwd: string;
+    disk_size_mb?: number | null;
     id: string;
     image?: string | null;
     memory: number;

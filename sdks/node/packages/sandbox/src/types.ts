@@ -43,6 +43,13 @@ export interface CreateSandboxOptions {
   source?: SandboxSource;
   /** Optional plaintext password for preview URLs (8–256 chars). */
   previewPassword?: string;
+  /**
+   * Isolation backend: 'docker' (default) or 'firecracker' (hardware-
+   * virtualized microVM; requires a host provisioned with
+   * `temps firecracker setup`). Requesting an unavailable backend fails
+   * rather than silently downgrading isolation.
+   */
+  backend?: 'docker' | 'firecracker';
 }
 
 export interface SandboxSummary {
