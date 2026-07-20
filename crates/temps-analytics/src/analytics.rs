@@ -3950,15 +3950,30 @@ WHERE project_id = $1
         // idx_events_project_timestamp with chunk exclusion.
         let page_stats_sql = format!(
             r#"
-            WITH sessions AS (
+            WITH ranked AS (
+                -- Window-sorted rather than ARRAY_AGG(...)[1]: ordered-set
+                -- aggregates accumulate every row of a session into an array
+                -- before taking the first element, so memory grows with total
+                -- pageviews in the window. A sort by (session_id, timestamp)
+                -- spills to disk as a well-behaved external merge sort and the
+                -- downstream GROUP BY streams over the already-sorted input.
                 SELECT
                     e.session_id,
-                    (ARRAY_AGG(e.page_path ORDER BY e.timestamp ASC))[1]  as entry_path,
-                    (ARRAY_AGG(e.page_path ORDER BY e.timestamp DESC))[1] as exit_path,
-                    COUNT(*) as page_views
+                    e.page_path,
+                    ROW_NUMBER() OVER w as rn,
+                    COUNT(*) OVER (PARTITION BY e.session_id) as pv_total
                 FROM events e
                 WHERE {where_clause} AND e.session_id IS NOT NULL
-                GROUP BY e.session_id
+                WINDOW w AS (PARTITION BY e.session_id ORDER BY e.timestamp ASC, e.id ASC)
+            ),
+            sessions AS (
+                SELECT
+                    session_id,
+                    MAX(page_path) FILTER (WHERE rn = 1) as entry_path,
+                    MAX(page_path) FILTER (WHERE rn = pv_total) as exit_path,
+                    MAX(pv_total) as page_views
+                FROM ranked
+                GROUP BY session_id
             ),
             entry_stats AS (
                 SELECT
