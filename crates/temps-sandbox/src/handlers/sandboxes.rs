@@ -46,6 +46,23 @@ use crate::handlers::SandboxAppState;
 /// working while new sandbox-only API tokens don't need broader project
 /// access just to manage sandboxes. The fallback is the quiet-deprecation
 /// path: operators can migrate tokens without breaking integrations.
+/// Gate host-global operations (rootfs inventory / GC) on admin. These
+/// expose or mutate storage across every tenant, so ordinary sandbox
+/// scopes are not enough.
+fn require_sandbox_admin(auth: &temps_auth::context::AuthContext) -> Result<(), Problem> {
+    if auth.is_admin() {
+        return Ok(());
+    }
+    Err(
+        temps_core::error_builder::ErrorBuilder::new(axum::http::StatusCode::FORBIDDEN)
+            .type_("https://temps.sh/probs/insufficient-permissions")
+            .title("Insufficient Permissions")
+            .detail("This operation requires an administrator role")
+            .value("user_role", auth.effective_role.to_string())
+            .build(),
+    )
+}
+
 fn sandbox_permission_guard(
     auth: &temps_auth::context::AuthContext,
     primary: Permission,
@@ -912,6 +929,12 @@ pub struct SandboxEventsResponse {
     pub events: Vec<SandboxEvent>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct EventsQuery {
+    /// Max events to return (default 100, clamped to 500).
+    pub limit: Option<u64>,
+}
+
 /// The operations timeline for a sandbox (lifecycle events only — never
 /// shell/exec activity), newest first.
 #[utoipa::path(
@@ -925,11 +948,12 @@ pub async fn list_events(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<SandboxAppState>>,
     Path(id): Path<String>,
+    Query(q): Query<EventsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
     sandbox_permission_guard(&auth, Permission::SandboxesRead, Permission::ProjectsRead)?;
     let rows = state
         .sandbox_service
-        .list_events(&id, auth.user_id())
+        .list_events(&id, auth.user_id(), q.limit.unwrap_or(100))
         .await?;
     let events = rows
         .into_iter()
@@ -973,8 +997,7 @@ pub async fn resize_sandbox(
         .sandbox_service
         .resize_sandbox(&id, auth.user_id(), body.disk_size_mb)
         .await?;
-    let envelopes =
-        build_summary_responses(&state, vec![SandboxSummary::from(&model)]).await;
+    let envelopes = build_summary_responses(&state, vec![SandboxSummary::from(&model)]).await;
     Ok(Json(envelopes.into_iter().next()))
 }
 
@@ -992,7 +1015,9 @@ pub async fn rootfs_report(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<SandboxAppState>>,
 ) -> Result<impl IntoResponse, Problem> {
-    sandbox_permission_guard(&auth, Permission::SandboxesRead, Permission::ProjectsRead)?;
+    // Host-global inventory (every tenant's VM names + image digests) — admin
+    // only, so one sandbox user can't enumerate the whole host.
+    require_sandbox_admin(&auth)?;
     let report = state.sandbox_service.rootfs_report().await?;
     Ok(Json(report))
 }
@@ -1010,7 +1035,8 @@ pub async fn rootfs_gc(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<SandboxAppState>>,
 ) -> Result<impl IntoResponse, Problem> {
-    sandbox_permission_guard(&auth, Permission::SandboxesWrite, Permission::ProjectsWrite)?;
+    // Host-wide reclaim — admin only.
+    require_sandbox_admin(&auth)?;
     let report = state.sandbox_service.gc_rootfs().await?;
     Ok(Json(report))
 }
@@ -2450,6 +2476,8 @@ mod tests {
             expires_at: now,
             preview_password_hint: None,
             ports: vec![],
+            backend: None,
+            disk_size_mb: None,
         };
         let r = SandboxResponse::from(summary);
         assert_eq!(r.sandbox.id, "sbx_abc");
@@ -2474,6 +2502,8 @@ mod tests {
             expires_at: now,
             preview_password_hint: None,
             ports: vec![3000, 5173],
+            backend: None,
+            disk_size_mb: None,
         };
         let parts = PreviewUrlParts {
             protocol: "https".into(),

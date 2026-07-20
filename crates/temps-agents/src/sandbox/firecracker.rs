@@ -13,9 +13,15 @@
 //!   rootfs-cache/<image-digest>.ext4          converted images, digest-keyed
 //!   vms/<name>/{rootfs.ext4,vm.json,fc.pid,v.sock,console.log,env.json}
 //!
+//! Networking: each networked VM gets a TAP off the pool provisioned by
+//! `temps firecracker setup`, NAT'd to the internet, with guest→host and
+//! cloud-metadata paths dropped and per-port isolation. Egress is otherwise
+//! open — scoping it to a credential proxy is ADR-013 (deferred), so
+//! `network_mode: "restricted"` currently fails closed to no-network.
+//!
 //! v1 sprint scope, deliberately deferred: the jailer (VMM runs as the
-//! server's own user — still KVM-isolated), TAP networking (VMs have no
-//! egress; exec/fs go over vsock), and snapshot-based pause.
+//! server's own user — still KVM-isolated), the ADR-013 egress credential
+//! proxy, and snapshot-based pause.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -28,9 +34,7 @@ use tokio::net::UnixStream;
 
 use temps_vm_agent::{Request, Response, AGENT_PORT, MAX_FRAME_BYTES, WORK_DIR};
 
-use super::{
-    KillSignal, SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider,
-};
+use super::{KillSignal, SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider};
 use crate::ai_cli::OnEventCallback;
 use crate::error::AgentError;
 
@@ -99,7 +103,7 @@ pub struct FirecrackerSandboxProvider {
     config: FirecrackerSandboxConfig,
     docker: Arc<bollard::Docker>,
     /// Serializes rootfs conversion per image digest.
-    conversion_lock: tokio::sync::Mutex<()>,
+    cache_lock: tokio::sync::Mutex<()>,
     /// Serializes TAP-pool allocation (backed by `taps.json`).
     tap_lock: tokio::sync::Mutex<()>,
 }
@@ -121,8 +125,9 @@ impl NetState {
     /// Guest IP for a TAP index. `.10+` leaves room for the gateway and
     /// future infrastructure addresses.
     fn guest_ip(&self, tap_index: u32) -> std::net::Ipv4Addr {
-        std::net::Ipv4Addr::from(u32::from(self.gateway) & (u32::MAX << (32 - self.prefix))
-            | (10 + tap_index))
+        std::net::Ipv4Addr::from(
+            u32::from(self.gateway) & (u32::MAX << (32 - self.prefix)) | (10 + tap_index),
+        )
     }
 }
 
@@ -131,7 +136,7 @@ impl FirecrackerSandboxProvider {
         Self {
             config,
             docker,
-            conversion_lock: tokio::sync::Mutex::new(()),
+            cache_lock: tokio::sync::Mutex::new(()),
             tap_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -266,9 +271,12 @@ impl FirecrackerSandboxProvider {
 
     /// Docker image → ext4 rootfs with the agent injected. Returns the
     /// cached artifact path, converting on first use per image digest.
-    async fn ensure_rootfs(&self, image: &str) -> Result<PathBuf, AgentError> {
-        let _guard = self.conversion_lock.lock().await;
-
+    ///
+    /// The caller MUST hold `cache_lock` — this serializes conversions and,
+    /// crucially, lets `create` keep the lock through the per-VM copy + the
+    /// reference marker so `gc_rootfs` (which also takes `cache_lock`) can't
+    /// delete a freshly-converted entry before it's referenced.
+    async fn ensure_rootfs_locked(&self, image: &str) -> Result<PathBuf, AgentError> {
         // Pull if missing, then resolve the digest-stable image id.
         let inspect = match self.docker.inspect_image(image).await {
             Ok(i) => i,
@@ -291,7 +299,10 @@ impl FirecrackerSandboxProvider {
 
         tracing::info!("converting {} ({}) to Firecracker rootfs", image, image_id);
         std::fs::create_dir_all(self.config.cache_dir())?;
-        let staging = self.config.cache_dir().join(format!("{}.staging", cache_key));
+        let staging = self
+            .config
+            .cache_dir()
+            .join(format!("{}.staging", cache_key));
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
 
@@ -308,11 +319,22 @@ impl FirecrackerSandboxProvider {
             )
             .await
             .map_err(|e| self.err("-", format!("create container for {}: {}", image, e)))?;
-        let mut export = self.docker.export_container(&container.id);
-        let mut tar_bytes = Vec::new();
-        while let Some(chunk) = export.next().await {
-            let chunk = chunk.map_err(|e| self.err("-", format!("export: {}", e)))?;
-            tar_bytes.extend_from_slice(&chunk);
+        // Stream the export to a temp tar on disk (bounded memory, vs.
+        // buffering the whole image), then do the CPU/IO-heavy extraction
+        // off the async runtime.
+        let tar_path = staging.join("export.tar");
+        {
+            let mut file = tokio::fs::File::create(&tar_path)
+                .await
+                .map_err(|e| self.err("-", format!("export tar create: {}", e)))?;
+            let mut export = self.docker.export_container(&container.id);
+            while let Some(chunk) = export.next().await {
+                let chunk = chunk.map_err(|e| self.err("-", format!("export: {}", e)))?;
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| self.err("-", format!("export write: {}", e)))?;
+            }
+            let _ = file.flush().await;
         }
         let _ = self
             .docker
@@ -325,41 +347,7 @@ impl FirecrackerSandboxProvider {
             )
             .await;
 
-        // Unprivileged extraction: skip device nodes (the agent mounts
-        // devtmpfs at boot); `unpack_in` sanitizes path traversal.
         let rootfs_dir = staging.join("rootfs");
-        std::fs::create_dir_all(&rootfs_dir)?;
-        let mut archive = tar::Archive::new(&tar_bytes[..]);
-        for entry in archive
-            .entries()
-            .map_err(|e| self.err("-", format!("tar: {}", e)))?
-        {
-            let mut entry = entry.map_err(|e| self.err("-", format!("tar entry: {}", e)))?;
-            match entry.header().entry_type() {
-                tar::EntryType::Regular
-                | tar::EntryType::Directory
-                | tar::EntryType::Symlink
-                | tar::EntryType::Link => {
-                    let _ = entry
-                        .unpack_in(&rootfs_dir)
-                        .map_err(|e| self.err("-", format!("unpack: {}", e)))?;
-                }
-                _ => {}
-            }
-        }
-
-        // Scrub Docker-injected artifacts. `docker export` bakes these into
-        // the container filesystem, but we only use Docker as an image
-        // toolchain — this is a microVM. `/.dockerenv` in particular makes
-        // `is-docker`-style probes misreport the runtime. The network files
-        // hold Docker's embedded-DNS values (127.0.0.11) that don't exist in
-        // the VM; the guest agent rewrites resolv.conf/hosts at boot anyway.
-        for artifact in [".dockerenv", "etc/resolv.conf", "etc/hostname", "etc/hosts"] {
-            let _ = std::fs::remove_file(rootfs_dir.join(artifact));
-        }
-
-        // Inject the agent — the only transport into the VM, injected into
-        // every image regardless of contents (static musl, runs anywhere).
         let agent_src = self.config.agent_bin();
         if !agent_src.exists() {
             return Err(self.err(
@@ -370,22 +358,57 @@ impl FirecrackerSandboxProvider {
                 ),
             ));
         }
-        let sbin = rootfs_dir.join("sbin");
-        std::fs::create_dir_all(&sbin)?;
-        std::fs::copy(&agent_src, sbin.join("temps-vm-agent"))?;
-        std::fs::create_dir_all(rootfs_dir.join(WORK_DIR.trim_start_matches('/')))?;
+        let workdir_rel = WORK_DIR.trim_start_matches('/').to_string();
 
-        // Size the cache to the image content + slack — this is the smallest
-        // the fs can be, and the floor for any per-VM disk. Each sandbox
-        // grows its own copy from here to the requested size (see `create`),
-        // so the cache stays minimal and disk size is per-sandbox.
+        // Blocking: unprivileged extraction (skip device nodes — the agent
+        // mounts devtmpfs at boot; `unpack_in` sanitizes path traversal),
+        // scrub Docker-injected artifacts (`/.dockerenv` fools is-docker
+        // probes; the network files hold Docker's embedded-DNS 127.0.0.11
+        // which doesn't exist in the VM and the agent rewrites at boot), and
+        // inject the guest agent. Returns the extracted content size.
+        let rootfs_for_task = rootfs_dir.clone();
+        let content_bytes = tokio::task::spawn_blocking(move || -> Result<u64, String> {
+            std::fs::create_dir_all(&rootfs_for_task).map_err(|e| e.to_string())?;
+            let tar_file = std::fs::File::open(&tar_path).map_err(|e| e.to_string())?;
+            let mut archive = tar::Archive::new(std::io::BufReader::new(tar_file));
+            for entry in archive.entries().map_err(|e| e.to_string())? {
+                let mut entry = entry.map_err(|e| e.to_string())?;
+                if matches!(
+                    entry.header().entry_type(),
+                    tar::EntryType::Regular
+                        | tar::EntryType::Directory
+                        | tar::EntryType::Symlink
+                        | tar::EntryType::Link
+                ) {
+                    let _ = entry
+                        .unpack_in(&rootfs_for_task)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            let _ = std::fs::remove_file(&tar_path);
+            for artifact in [".dockerenv", "etc/resolv.conf", "etc/hostname", "etc/hosts"] {
+                let _ = std::fs::remove_file(rootfs_for_task.join(artifact));
+            }
+            let sbin = rootfs_for_task.join("sbin");
+            std::fs::create_dir_all(&sbin).map_err(|e| e.to_string())?;
+            std::fs::copy(&agent_src, sbin.join("temps-vm-agent")).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(rootfs_for_task.join(&workdir_rel))
+                .map_err(|e| e.to_string())?;
+            Ok(dir_size(&rootfs_for_task))
+        })
+        .await
+        .map_err(|e| self.err("-", format!("extraction task: {}", e)))?
+        .map_err(|e| self.err("-", format!("extraction: {}", e)))?;
+
+        // Size the cache to the image content + slack — the smallest the fs
+        // can be, and the floor for any per-VM disk. Each sandbox grows its
+        // own copy from here (see `create`), so the cache stays minimal.
         //
         // `lazy_itable_init=0` + `lazy_journal_init=0` write the inode tables
         // and journal at mkfs time (into the sparse staging file, so they
         // cost nothing on disk) instead of letting the guest kernel's
         // ext4lazyinit thread scribble across the whole device on first
         // mount — which was inflating every per-VM copy to the full size.
-        let content_bytes = dir_size(&rootfs_dir);
         let base_bytes =
             ((content_bytes * 3 / 2) + CACHE_SLACK_MB * 1024 * 1024).next_multiple_of(4096);
         let base_blocks = base_bytes / 4096;
@@ -480,7 +503,10 @@ impl FirecrackerSandboxProvider {
                         .join(" | ");
                     return Err(self.err(
                         name,
-                        format!("agent not ready within {:?}; console tail: {}", AGENT_READY_TIMEOUT, tail),
+                        format!(
+                            "agent not ready within {:?}; console tail: {}",
+                            AGENT_READY_TIMEOUT, tail
+                        ),
                     ));
                 }
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -623,7 +649,9 @@ impl FirecrackerSandboxProvider {
     /// blocks, not the apparent length).
     fn disk_bytes(path: &Path) -> u64 {
         use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
+        std::fs::metadata(path)
+            .map(|m| m.blocks() * 512)
+            .unwrap_or(0)
     }
 }
 
@@ -638,30 +666,47 @@ impl SandboxProvider for FirecrackerSandboxProvider {
             .filter(|i| !i.is_empty())
             .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
 
-        let rootfs_cache = self.ensure_rootfs(&image).await.map_err(|e| {
-            AgentError::SandboxCreationFailed {
-                run_id: config.run_id,
-                provider: "firecracker".to_string(),
-                reason: e.to_string(),
-            }
-        })?;
-
-        std::fs::create_dir_all(&vm_dir)?;
-        // Per-VM writable copy. Use `cp --sparse=always` (SEEK_HOLE-aware) so
-        // the copy reproduces the source's holes — `std::fs::copy`'s
-        // copy_file_range path doesn't reliably preserve sparseness on ext4
-        // and inflates each per-VM disk to the full nominal size.
+        // Convert (or reuse) the cached rootfs, copy it for this VM, and mark
+        // the cache entry as referenced — ALL under the cache lock so a
+        // concurrent destroy-triggered GC can't delete the entry between the
+        // conversion and the reference marker landing. Only the fast bits are
+        // in the critical section; the VM boot below is not.
         let vm_rootfs = vm_dir.join("rootfs.ext4");
-        let cp = tokio::process::Command::new("cp")
-            .args(["--sparse=always", "--reflink=auto"])
-            .arg(&rootfs_cache)
-            .arg(&vm_rootfs)
-            .output()
-            .await?;
-        if !cp.status.success() {
-            // Fall back to std copy rather than fail the create.
-            std::fs::copy(&rootfs_cache, &vm_rootfs)?;
+        {
+            let _cache_guard = self.cache_lock.lock().await;
+            let rootfs_cache = self.ensure_rootfs_locked(&image).await.map_err(|e| {
+                AgentError::SandboxCreationFailed {
+                    run_id: config.run_id,
+                    provider: "firecracker".to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+
+            std::fs::create_dir_all(&vm_dir)?;
+            // The VM dir holds the rootfs, sockets, and `env.json` (injected
+            // credentials like ANTHROPIC_API_KEY). 0700 keeps other local
+            // users out of the secrets.
+            set_dir_private(&vm_dir);
+            // Per-VM writable copy. `cp --sparse=always` (SEEK_HOLE-aware)
+            // reproduces the source's holes — `std::fs::copy`'s
+            // copy_file_range path doesn't reliably preserve sparseness on
+            // ext4 and inflates each per-VM disk to the full nominal size.
+            let cp = tokio::process::Command::new("cp")
+                .args(["--sparse=always", "--reflink=auto"])
+                .arg(&rootfs_cache)
+                .arg(&vm_rootfs)
+                .output()
+                .await?;
+            if !cp.status.success() {
+                std::fs::copy(&rootfs_cache, &vm_rootfs)?;
+            }
+            // Reference marker (cache file stem is the digest). Written under
+            // the lock so GC sees it before it can consider the entry orphaned.
+            if let Some(digest) = rootfs_cache.file_stem().and_then(|s| s.to_str()) {
+                let _ = std::fs::write(vm_dir.join("image.digest"), digest);
+            }
         }
+
         // Grow the per-VM disk to the requested size. The cache is sized to
         // the image content (its floor); we only ever grow, never shrink, so
         // the requested size is clamped up to that floor. `resize2fs` adds
@@ -682,12 +727,6 @@ impl SandboxProvider for FirecrackerSandboxProvider {
                 });
             }
         }
-        // Record which cached rootfs this VM was cloned from so the GC knows
-        // the cache entry is still needed while this sandbox exists. The
-        // cache file stem is the digest (`sha256-<hex>`).
-        if let Some(digest) = rootfs_cache.file_stem().and_then(|s| s.to_str()) {
-            let _ = std::fs::write(vm_dir.join("image.digest"), digest);
-        }
 
         let vcpus = config
             .cpu_limit
@@ -698,14 +737,25 @@ impl SandboxProvider for FirecrackerSandboxProvider {
             .unwrap_or(self.config.default_memory_mib);
 
         // Networking: `"none"` boots without a NIC (stronger than Docker's
-        // none — there is no device at all). Everything else gets a TAP off
-        // the pool; "restricted" tightens to the egress proxy when ADR-013
-        // lands and is full-NAT until then. Guest addressing rides the
-        // kernel's built-in IP autoconfig (`ip=` boot args) — no DHCP.
+        // none — there is no device at all). `"restricted"` is meant to scope
+        // egress to the credential proxy (ADR-013), which isn't built yet —
+        // so it FAILS CLOSED to no-network rather than silently granting the
+        // full-NAT egress it's asking to restrict. `"full"`/None get a TAP.
+        // Guest addressing rides the kernel's built-in IP autoconfig.
+        let networked = !matches!(
+            config.network_mode.as_deref(),
+            Some("none") | Some("restricted")
+        );
+        if config.network_mode.as_deref() == Some("restricted") {
+            tracing::warn!(
+                "firecracker: network_mode \"restricted\" not yet supported \
+                 (needs the ADR-013 egress proxy); booting with no network"
+            );
+        }
         let mut boot_args =
             "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/temps-vm-agent".to_string();
         let mut network_interfaces = Vec::new();
-        if config.network_mode.as_deref() != Some("none") {
+        if networked {
             let net = self.net_state().filter(|n| n.tap_count > 0);
             match net {
                 Some(net) => {
@@ -762,10 +812,12 @@ impl SandboxProvider for FirecrackerSandboxProvider {
             vm_dir.join("vm.json"),
             serde_json::to_vec_pretty(&vm_config).map_err(|e| self.err(&name, e))?,
         )?;
+        let env_path = vm_dir.join("env.json");
         std::fs::write(
-            vm_dir.join("env.json"),
+            &env_path,
             serde_json::to_vec(&config.env_vars).map_err(|e| self.err(&name, e))?,
         )?;
+        set_file_private(&env_path);
 
         if let Err(e) = self.spawn_vm(&name).await {
             let _ = std::fs::remove_dir_all(&vm_dir);
@@ -913,8 +965,13 @@ impl SandboxProvider for FirecrackerSandboxProvider {
                 } else if meta.is_file() {
                     use std::os::unix::fs::PermissionsExt;
                     let contents = std::fs::read(&path)?;
-                    self.write_file(handle, &target, &contents, meta.permissions().mode() & 0o777)
-                        .await?;
+                    self.write_file(
+                        handle,
+                        &target,
+                        &contents,
+                        meta.permissions().mode() & 0o777,
+                    )
+                    .await?;
                 }
             }
         }
@@ -940,7 +997,11 @@ impl SandboxProvider for FirecrackerSandboxProvider {
         Ok(())
     }
 
-    async fn destroy(&self, handle: &SandboxHandle, _purge_volumes: bool) -> Result<(), AgentError> {
+    async fn destroy(
+        &self,
+        handle: &SandboxHandle,
+        _purge_volumes: bool,
+    ) -> Result<(), AgentError> {
         let name = &handle.sandbox_name;
         let _ = self.stop(handle).await;
         if let Some(pid) = self.vm_pid(name) {
@@ -1052,6 +1113,10 @@ impl SandboxProvider for FirecrackerSandboxProvider {
         }
     }
 
+    fn supports_backend(&self, backend: super::SandboxBackend) -> bool {
+        matches!(backend, super::SandboxBackend::Firecracker)
+    }
+
     fn name(&self) -> &str {
         "firecracker"
     }
@@ -1135,6 +1200,9 @@ impl SandboxProvider for FirecrackerSandboxProvider {
     }
 
     async fn gc_rootfs(&self) -> Result<super::RootfsGcReport, AgentError> {
+        // Hold the cache lock so we never race an in-flight `create` between
+        // its conversion and its reference marker (see `ensure_rootfs_locked`).
+        let _cache_guard = self.cache_lock.lock().await;
         let refs = self.referenced_digests();
         let mut report = super::RootfsGcReport::default();
         let Ok(entries) = std::fs::read_dir(self.config.cache_dir()) else {
@@ -1162,11 +1230,33 @@ impl SandboxProvider for FirecrackerSandboxProvider {
             tracing::info!(
                 "firecracker rootfs GC: reclaimed {} cache entr{} ({} bytes)",
                 report.removed_digests.len(),
-                if report.removed_digests.len() == 1 { "y" } else { "ies" },
+                if report.removed_digests.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
                 report.freed_bytes
             );
         }
         Ok(report)
+    }
+}
+
+/// Restrict a directory to the owner (0700). Best-effort — a failure is
+/// logged, not fatal, since it only weakens local isolation.
+fn set_dir_private(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
+        tracing::warn!("failed to 0700 {}: {}", path.display(), e);
+    }
+}
+
+/// Restrict a file to the owner (0600) — used for `env.json`, which carries
+/// injected credentials.
+fn set_file_private(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("failed to 0600 {}: {}", path.display(), e);
     }
 }
 

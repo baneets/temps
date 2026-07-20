@@ -3,9 +3,8 @@
 //! Keeps ADR-010's invariant intact: consumers hold exactly one
 //! `Arc<dyn SandboxProvider>`. This impl owns the concrete backends and
 //! dispatches per call — `create` by the requested `SandboxBackend`,
-//! handle-based methods by the handle's name prefix (`temps-fcsandbox-`
-//! marks Firecracker; everything else goes to the default backend). No
-//! trait change, no per-call DB lookup.
+//! handle-based methods by the typed `SandboxHandle.backend` the owning
+//! provider stamped (no name parsing, no per-call DB lookup).
 //!
 //! Every trait method is overridden, including the ones with default
 //! bodies — a default body running on the router would silently bypass a
@@ -15,7 +14,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::firecracker::FC_SANDBOX_NAME_PREFIX;
 use super::{
     KillSignal, OnStreamEventCallback, SandboxBackend, SandboxCreateConfig, SandboxExecResult,
     SandboxHandle, SandboxProvider,
@@ -79,11 +77,8 @@ impl RoutingSandboxProvider {
     /// rest — deterministic so a name that could exist in two backends
     /// resolves stably.
     fn scan_order(&self) -> Vec<&Arc<dyn SandboxProvider>> {
-        let mut order: Vec<(SandboxBackend, &Arc<dyn SandboxProvider>)> = self
-            .backends
-            .iter()
-            .map(|(b, p)| (*b, p))
-            .collect();
+        let mut order: Vec<(SandboxBackend, &Arc<dyn SandboxProvider>)> =
+            self.backends.iter().map(|(b, p)| (*b, p)).collect();
         order.sort_by_key(|(b, _)| (*b != self.default, b.to_string()));
         order.into_iter().map(|(_, p)| p).collect()
     }
@@ -103,7 +98,9 @@ impl SandboxProvider for RoutingSandboxProvider {
         env: HashMap<String, String>,
         on_output: Option<OnEventCallback>,
     ) -> Result<SandboxExecResult, AgentError> {
-        self.owner_of(handle).exec(handle, cmd, env, on_output).await
+        self.owner_of(handle)
+            .exec(handle, cmd, env, on_output)
+            .await
     }
 
     async fn exec_as_root(

@@ -55,14 +55,16 @@ import {
   execMutation,
   extendTimeoutMutation,
   getSandboxOptions,
+  listEventsOptions,
   listJobsOptions,
   pauseSandboxMutation,
+  resizeSandboxMutation,
   restartSandboxMutation,
   resumeSandboxMutation,
   stopSandboxMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { jobStatus } from '@/api/client/sdk.gen'
-import type { ExecResponse } from '@/api/client/types.gen'
+import type { ExecResponse, SandboxEvent } from '@/api/client/types.gen'
 import {
   jobLogsUrl,
   toSandboxView,
@@ -85,12 +87,6 @@ function statusVariant(
   }
 }
 
-type SandboxEvent = {
-  event_type: string
-  detail?: Record<string, unknown> | null
-  at: number
-}
-
 // Presentation for each timeline event type: icon, human label, and an
 // optional one-line detail derived from the event's structured payload.
 function eventPresentation(e: SandboxEvent): {
@@ -98,7 +94,7 @@ function eventPresentation(e: SandboxEvent): {
   label: string
   detail?: string
 } {
-  const d = e.detail ?? {}
+  const d = (e.detail ?? {}) as Record<string, unknown>
   switch (e.event_type) {
     case 'created':
       return {
@@ -301,21 +297,12 @@ export default function SandboxDetail() {
   })
   const jobs: JobSummary[] = jobsResp?.items ?? []
 
-  // Operations timeline (lifecycle events, not shell). Fetched directly —
-  // it's a lightweight list the generated client doesn't wrap yet. Polls
-  // while alive so a stop/resize/extend shows up without a manual refresh.
+  // Operations timeline (lifecycle events, not shell). Polls while alive so
+  // a stop/resize/extend shows up without a manual refresh.
   const { data: eventsResp } = useQuery({
-    queryKey: ['sandbox-events', sandboxId],
+    ...listEventsOptions({ path: { id: sandboxId } }),
     enabled: sandboxId.length > 0,
     refetchInterval: jobsEnabled ? 5_000 : false,
-    queryFn: async (): Promise<{ events: SandboxEvent[] }> => {
-      const res = await fetch(
-        `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/events`,
-        { credentials: 'include' },
-      )
-      if (!res.ok) throw new Error(`events: ${res.status}`)
-      return res.json()
-    },
   })
   const events: SandboxEvent[] = eventsResp?.events ?? []
 
@@ -326,30 +313,14 @@ export default function SandboxDetail() {
   }
 
   const resizeMutation = useMutation({
-    mutationKey: ['sandbox-resize', sandboxId],
+    ...resizeSandboxMutation(),
     meta: { errorTitle: 'Failed to resize disk' },
-    mutationFn: async (diskSizeMb: number) => {
-      const res = await fetch(
-        `/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/resize`,
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ disk_size_mb: diskSizeMb }),
-        },
-      )
-      if (!res.ok) {
-        const problem = await res.json().catch(() => ({}))
-        throw new Error(problem.detail ?? `resize failed (${res.status})`)
-      }
-    },
     onSuccess: () => {
       invalidate()
       setResizeOpen(false)
       setResizeInput('')
       toast.success('Disk resized — sandbox restarted')
     },
-    onError: (err: Error) => toast.error(err.message),
   })
 
   const deleteMutation = useMutation({
@@ -1004,7 +975,10 @@ export default function SandboxDetail() {
               {events.map((e, i) => {
                 const { icon: Icon, label, detail } = eventPresentation(e)
                 return (
-                  <li key={i} className="flex items-start gap-3">
+                  <li
+                    key={`${e.at}-${e.event_type}-${i}`}
+                    className="flex items-start gap-3"
+                  >
                     <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border bg-muted/40">
                       <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                     </span>
@@ -1078,7 +1052,10 @@ export default function SandboxDetail() {
               }
               onClick={(e) => {
                 e.preventDefault()
-                resizeMutation.mutate(Number(resizeInput))
+                resizeMutation.mutate({
+                  path: { id: sandboxId },
+                  body: { disk_size_mb: Number(resizeInput) },
+                })
               }}
             >
               {resizeMutation.isPending ? 'Resizing…' : 'Resize'}

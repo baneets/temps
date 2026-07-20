@@ -2187,6 +2187,10 @@ impl SandboxProvider for DockerSandboxProvider {
         self.recover_container(&full_name).await
     }
 
+    fn supports_backend(&self, backend: super::SandboxBackend) -> bool {
+        matches!(backend, super::SandboxBackend::Docker)
+    }
+
     fn name(&self) -> &str {
         "docker"
     }

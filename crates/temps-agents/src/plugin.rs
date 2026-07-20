@@ -521,10 +521,8 @@ impl TempsPlugin for AgentsPlugin {
                                     default_memory_limit_mb: global_sandbox.memory_limit_mb,
                                     network_mode: global_sandbox.network_mode.clone(),
                                 };
-                                let provider = Arc::new(DockerSandboxProvider::new(
-                                    docker.clone(),
-                                    config,
-                                ));
+                                let provider =
+                                    Arc::new(DockerSandboxProvider::new(docker.clone(), config));
                                 tracing::info!(
                                     "Docker sandbox provider initialized (image built on demand at first agent run)"
                                 );

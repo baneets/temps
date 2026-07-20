@@ -174,7 +174,7 @@ pub struct SandboxCreateConfig {
 
 /// A cached rootfs image (Firecracker backend). Digest-keyed build artifact
 /// shared by all VMs created from the same image.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct RootfsCacheEntry {
     /// Image digest this rootfs was built from (the cache key).
     pub digest: String,
@@ -187,7 +187,7 @@ pub struct RootfsCacheEntry {
 
 /// A per-sandbox rootfs disk (Firecracker backend). One per non-destroyed
 /// sandbox — the authoritative storage, independent of the cache.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct RootfsVmEntry {
     pub sandbox_name: String,
     pub bytes: u64,
@@ -196,7 +196,7 @@ pub struct RootfsVmEntry {
 
 /// Snapshot of a backend's rootfs storage for the management API. Backends
 /// without a rootfs concept (Docker, local) return an empty report.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, utoipa::ToSchema)]
 pub struct RootfsReport {
     pub cache_bytes: u64,
     pub cache: Vec<RootfsCacheEntry>,
@@ -205,7 +205,7 @@ pub struct RootfsReport {
 }
 
 /// Outcome of a rootfs garbage-collection pass.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, utoipa::ToSchema)]
 pub struct RootfsGcReport {
     /// Digests of cache entries removed because no sandbox referenced them.
     pub removed_digests: Vec<String>,
@@ -474,6 +474,18 @@ pub trait SandboxProvider: Send + Sync {
         _container_name: &str,
     ) -> Result<Option<SandboxHandle>, AgentError> {
         Ok(None)
+    }
+
+    /// Whether this provider can create sandboxes on `backend`. Consumers
+    /// call this before create so a request for an unprovisioned backend
+    /// (e.g. `firecracker` on a Docker-only host) fails with a clear error
+    /// instead of silently downgrading. Concrete single-backend providers
+    /// answer for their own backend; the routing provider answers for every
+    /// backend it has registered. Default is permissive for backwards
+    /// compatibility, so every concrete provider overrides it.
+    fn supports_backend(&self, backend: SandboxBackend) -> bool {
+        let _ = backend;
+        true
     }
 
     /// Provider name for logging and error messages.

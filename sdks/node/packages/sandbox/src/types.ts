@@ -58,6 +58,10 @@ export interface SandboxSummary {
   status: string;
   image: string | null;
   workDir: string;
+  /** Isolation backend the sandbox runs on ('docker' | 'firecracker'). */
+  backend?: string;
+  /** Root disk size in MB (Firecracker). */
+  diskSizeMb?: number;
   createdAt: string;
   expiresAt: string;
   /**
@@ -66,6 +70,20 @@ export interface SandboxSummary {
    */
   previewUrlTemplate: string;
   previewPasswordHint?: string;
+}
+
+/** One entry in a sandbox's operations timeline. */
+export interface SandboxEvent {
+  /**
+   * Machine-readable operation: 'created' | 'stopped' | 'resumed' |
+   * 'restarted' | 'timeout_extended' | 'resized' | 'preview_password_set' |
+   * 'preview_password_cleared' | 'source_seeded' | 'destroyed'.
+   */
+  event_type: string;
+  /** Optional structured context; shape depends on `event_type`. */
+  detail?: Record<string, unknown> | null;
+  /** Event time, Unix epoch milliseconds. */
+  at: number;
 }
 
 export interface ExecOptions {

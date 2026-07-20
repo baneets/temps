@@ -18,7 +18,7 @@ use std::time::Duration;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 
 use temps_agents::sandbox::SandboxCreateConfig;
@@ -325,6 +325,18 @@ impl SandboxService {
             }
         };
 
+        // Fail closed if the caller asked for a backend this host can't
+        // provide (e.g. `firecracker` on a Docker-only host). Isolation
+        // level is a security property — silently downgrading to Docker
+        // would be worse than a clear error.
+        if let Some(b) = backend {
+            if !self.registry.provider_arc().supports_backend(b) {
+                return Err(SandboxError::Validation {
+                    message: format!("backend '{}' is not available on this host", b),
+                });
+            }
+        }
+
         // Validate + hash the optional preview password *before* any
         // container/workdir work starts. A caller passing junk should fail
         // fast with a 400 rather than leaving an orphan container behind.
@@ -424,8 +436,8 @@ impl SandboxService {
         // default decided; the handle carries the real answers. Stored so
         // the API/UI show what actually booted (e.g. "alpine:3.20") instead
         // of a vague "platform default".
-        let effective_image = (req.image.is_none() && !handle.image.is_empty())
-            .then(|| handle.image.clone());
+        let effective_image =
+            (req.image.is_none() && !handle.image.is_empty()).then(|| handle.image.clone());
         if let Err(e) = self
             .record_backend(row.id, handle.backend, effective_image.clone())
             .await
@@ -1035,29 +1047,23 @@ TEMPS_ASKPASS_EOF\n\
 
     /// Rootfs storage inventory across backends (Firecracker cache + per-VM
     /// disks). Powers the management API's inspection endpoint.
-    pub async fn rootfs_report(
-        &self,
-    ) -> Result<temps_agents::sandbox::RootfsReport, SandboxError> {
+    pub async fn rootfs_report(&self) -> Result<temps_agents::sandbox::RootfsReport, SandboxError> {
         self.registry
             .provider_arc()
             .rootfs_report()
             .await
-            .map_err(|e| SandboxError::CreateFailed {
-                user_id: 0,
+            .map_err(|e| SandboxError::Unavailable {
                 reason: format!("rootfs report: {}", e),
             })
     }
 
     /// Reclaim rootfs cache entries not backing any live sandbox.
-    pub async fn gc_rootfs(
-        &self,
-    ) -> Result<temps_agents::sandbox::RootfsGcReport, SandboxError> {
+    pub async fn gc_rootfs(&self) -> Result<temps_agents::sandbox::RootfsGcReport, SandboxError> {
         self.registry
             .provider_arc()
             .gc_rootfs()
             .await
-            .map_err(|e| SandboxError::CreateFailed {
-                user_id: 0,
+            .map_err(|e| SandboxError::Unavailable {
                 reason: format!("rootfs gc: {}", e),
             })
     }
@@ -1093,12 +1099,18 @@ TEMPS_ASKPASS_EOF\n\
         &self,
         public_id_value: &str,
         user_id: i32,
+        limit: u64,
     ) -> Result<Vec<sandbox_events::Model>, SandboxError> {
+        // Bounded — the timeline is append-only and a UI only ever shows the
+        // most recent slice. Cap the page so a long-lived sandbox can't force
+        // an unbounded scan.
+        let limit = limit.clamp(1, 500);
         let row = self.find_by_public_id(public_id_value, user_id).await?;
         let events = sandbox_events::Entity::find()
             .filter(sandbox_events::Column::SandboxId.eq(row.id))
             .order_by_desc(sandbox_events::Column::CreatedAt)
             .order_by_desc(sandbox_events::Column::Id)
+            .limit(limit)
             .all(self.db.as_ref())
             .await?;
         Ok(events)
@@ -1155,7 +1167,8 @@ TEMPS_ASKPASS_EOF\n\
         active.preview_password_hash = Set(Some(hp.hash));
         active.preview_password_hint = Set(Some(hp.hint.clone()));
         active.update(self.db.as_ref()).await?;
-        self.record_event(sandbox_id, "preview_password_set", None).await;
+        self.record_event(sandbox_id, "preview_password_set", None)
+            .await;
         Ok(hp.hint)
     }
 
@@ -1309,6 +1322,7 @@ mod tests {
             work_dir: "/workspace".into(),
             timeout_secs: 3600,
             metadata: None,
+            backend: None,
             created_at: now,
             last_activity_at: now,
             expires_at: now,

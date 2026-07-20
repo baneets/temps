@@ -473,11 +473,7 @@ async fn execute_show(cmd: SandboxShowCommand) -> anyhow::Result<()> {
         "Image:".bright_white().bold(),
         sandbox.image.as_deref().unwrap_or("<default>")
     );
-    println!(
-        "  {} {}",
-        "Work dir:".bright_white().bold(),
-        sandbox.cwd
-    );
+    println!("  {} {}", "Work dir:".bright_white().bold(), sandbox.cwd);
     println!(
         "  {} {}",
         "Created:".bright_white().bold(),
@@ -659,6 +655,7 @@ mod tests {
             name: None,
             timeout_secs: None,
             env: HashMap::new(),
+            backend: None,
         };
         let j = serde_json::to_string(&body).expect("serializes");
         // All fields have `skip_serializing_if`, so nothing is emitted.
@@ -675,6 +672,7 @@ mod tests {
             name: Some("demo".into()),
             timeout_secs: Some(300),
             env,
+            backend: None,
         };
         let j = serde_json::to_value(&body).expect("serializes");
         assert_eq!(j["image"], "node:20");

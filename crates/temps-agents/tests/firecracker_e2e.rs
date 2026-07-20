@@ -17,9 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use temps_agents::sandbox::firecracker::{
-    FirecrackerSandboxConfig, FirecrackerSandboxProvider,
-};
+use temps_agents::sandbox::firecracker::{FirecrackerSandboxConfig, FirecrackerSandboxProvider};
 use temps_agents::sandbox::routing::RoutingSandboxProvider;
 use temps_agents::sandbox::{SandboxBackend, SandboxCreateConfig, SandboxProvider};
 
@@ -54,9 +52,8 @@ fn create_config(run_id: i32) -> SandboxCreateConfig {
 async fn firecracker_sandbox_full_lifecycle() {
     let Some(data_dir) = gated() else { return };
 
-    let docker = Arc::new(
-        bollard::Docker::connect_with_local_defaults().expect("docker (image toolchain)"),
-    );
+    let docker =
+        Arc::new(bollard::Docker::connect_with_local_defaults().expect("docker (image toolchain)"));
     let firecracker: Arc<dyn SandboxProvider> = Arc::new(FirecrackerSandboxProvider::new(
         FirecrackerSandboxConfig::from_data_dir(data_dir),
         docker,
@@ -76,7 +73,11 @@ async fn firecracker_sandbox_full_lifecycle() {
     // ── create ──
     let started = std::time::Instant::now();
     let handle = provider.create(create_config(9001)).await.expect("create");
-    println!("created {} in {:.2}s", handle.sandbox_name, started.elapsed().as_secs_f64());
+    println!(
+        "created {} in {:.2}s",
+        handle.sandbox_name,
+        started.elapsed().as_secs_f64()
+    );
     assert!(handle.sandbox_name.starts_with("temps-fcsandbox-"));
     assert!(provider.is_alive(&handle).await.expect("is_alive"));
 
@@ -96,9 +97,18 @@ async fn firecracker_sandbox_full_lifecycle() {
         .expect("exec");
     println!("exec stdout: {}", result.stdout.trim());
     assert_eq!(result.exit_code, 0);
-    assert!(result.stdout.contains("Linux 6.1.141"), "runs the guest kernel");
-    assert!(result.stdout.contains("greeting=from-env"), "create-time env injected");
-    assert!(result.stdout.contains("/workspace"), "work_dir is the exec cwd");
+    assert!(
+        result.stdout.contains("Linux 6.1.141"),
+        "runs the guest kernel"
+    );
+    assert!(
+        result.stdout.contains("greeting=from-env"),
+        "create-time env injected"
+    );
+    assert!(
+        result.stdout.contains("/workspace"),
+        "work_dir is the exec cwd"
+    );
 
     // ── egress: DNS resolution + HTTP through the TAP/NAT path ──
     let result = provider
@@ -115,7 +125,10 @@ async fn firecracker_sandbox_full_lifecycle() {
         .await
         .expect("exec egress check");
     assert_eq!(result.exit_code, 0, "egress failed: {}", result.stderr);
-    assert!(result.stdout.contains("success"), "expected portal-check body");
+    assert!(
+        result.stdout.contains("success"),
+        "expected portal-check body"
+    );
 
     // ── exec: stderr split + exit code ──
     let result = provider
@@ -151,14 +164,20 @@ async fn firecracker_sandbox_full_lifecycle() {
 
     // ── stop → filesystem persists → start ──
     provider.stop(&handle).await.expect("stop");
-    assert!(!provider.is_alive(&handle).await.expect("is_alive after stop"));
+    assert!(!provider
+        .is_alive(&handle)
+        .await
+        .expect("is_alive after stop"));
     let recovered = provider
         .recover_by_name(&handle.sandbox_name)
         .await
         .expect("recover_by_name")
         .expect("stopped sandbox is recoverable");
     provider.start(&recovered).await.expect("start");
-    assert!(provider.is_alive(&recovered).await.expect("is_alive after start"));
+    assert!(provider
+        .is_alive(&recovered)
+        .await
+        .expect("is_alive after start"));
     let result = provider
         .exec(
             &recovered,

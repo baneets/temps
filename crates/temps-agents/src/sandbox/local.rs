@@ -267,6 +267,10 @@ impl SandboxProvider for LocalSandboxProvider {
         Ok(None)
     }
 
+    fn supports_backend(&self, backend: super::SandboxBackend) -> bool {
+        matches!(backend, super::SandboxBackend::Local)
+    }
+
     fn name(&self) -> &str {
         "local"
     }
@@ -359,7 +363,7 @@ mod tests {
             sandbox_id: "test".to_string(),
             sandbox_name: "test".to_string(),
             work_dir: std::env::temp_dir(),
-            backend: super::SandboxBackend::Local,
+            backend: crate::sandbox::SandboxBackend::Local,
             image: String::new(),
         };
 
@@ -377,7 +381,7 @@ mod tests {
             sandbox_id: "test".to_string(),
             sandbox_name: "test".to_string(),
             work_dir: work_dir.clone(),
-            backend: super::SandboxBackend::Local,
+            backend: crate::sandbox::SandboxBackend::Local,
             image: String::new(),
         };
 

@@ -9,6 +9,7 @@ import type {
   ListSandboxesOptions,
   ListSandboxesPage,
   SandboxConfig,
+  SandboxEvent,
   SandboxSource,
   SandboxSummary,
   StatInfo,
@@ -31,6 +32,8 @@ interface WireSandboxInner {
   createdAt: number;
   /** Idle timeout in milliseconds. */
   timeout: number;
+  backend?: string | null;
+  disk_size_mb?: number | null;
   preview_url_template: string;
   preview_password_hint?: string;
 }
@@ -75,6 +78,8 @@ function toSummary(w: WireSandboxInner): SandboxSummary {
     status: w.status,
     image: w.image,
     workDir: w.cwd,
+    backend: w.backend ?? undefined,
+    diskSizeMb: w.disk_size_mb ?? undefined,
     createdAt: new Date(w.createdAt).toISOString(),
     expiresAt: new Date(w.createdAt + w.timeout).toISOString(),
     previewUrlTemplate: w.preview_url_template,
@@ -355,6 +360,38 @@ export class Sandbox {
   /** Stop **and** delete the sandbox. Irreversible. */
   async destroy(): Promise<void> {
     await request<void>(this.cfg, 'POST', `/v1/sandboxes/${this.id}/destroy`);
+  }
+
+  /**
+   * Grow the root disk to `diskSizeMb` (Firecracker only; grow-only). The
+   * sandbox restarts briefly to apply it — the filesystem is preserved.
+   * Returns the refreshed summary.
+   */
+  async resize(diskSizeMb: number): Promise<SandboxSummary> {
+    const wire = await request<WireSandboxEnvelope>(
+      this.cfg,
+      'POST',
+      `/v1/sandboxes/${this.id}/resize`,
+      { disk_size_mb: diskSizeMb }
+    );
+    this.summary = toSummary(wire.sandbox);
+    return this.summary;
+  }
+
+  /**
+   * The operations timeline for this sandbox (lifecycle events only —
+   * create/stop/resume/restart/extend/resize/preview-password/destroy —
+   * never shell activity), newest first.
+   */
+  async events(limit?: number): Promise<SandboxEvent[]> {
+    const wire = await request<{ events: SandboxEvent[] }>(
+      this.cfg,
+      'GET',
+      `/v1/sandboxes/${this.id}/events`,
+      undefined,
+      limit ? { limit } : undefined
+    );
+    return wire.events;
   }
 }
 

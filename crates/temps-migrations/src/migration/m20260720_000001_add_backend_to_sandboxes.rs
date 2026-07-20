@@ -15,9 +15,7 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
-            .execute_unprepared(
-                "ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS backend VARCHAR",
-            )
+            .execute_unprepared("ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS backend VARCHAR")
             .await?;
         Ok(())
     }

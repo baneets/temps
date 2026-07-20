@@ -445,19 +445,17 @@ impl FirecrackerSetupCommand {
 
         // Docker daemon — the image toolchain in v1 (pull/build/export)
         match bollard::Docker::connect_with_local_defaults() {
-            Ok(docker) => {
-                match tokio::time::timeout(Duration::from_secs(5), docker.ping()).await {
-                    Ok(Ok(_)) => pass("Docker", "Daemon reachable (image toolchain)"),
-                    _ => {
-                        fail(
-                            "Docker",
-                            "Daemon not reachable. Firecracker sandboxes derive their \
+            Ok(docker) => match tokio::time::timeout(Duration::from_secs(5), docker.ping()).await {
+                Ok(Ok(_)) => pass("Docker", "Daemon reachable (image toolchain)"),
+                _ => {
+                    fail(
+                        "Docker",
+                        "Daemon not reachable. Firecracker sandboxes derive their \
                              root filesystems from Docker images; Docker must be running.",
-                        );
-                        failures += 1;
-                    }
+                    );
+                    failures += 1;
                 }
-            }
+            },
             Err(e) => {
                 fail("Docker", format!("Cannot connect: {}", e));
                 failures += 1;
@@ -615,15 +613,12 @@ impl FirecrackerSetupCommand {
     /// or a `temps-vm-agent` file next to the running executable (release
     /// tarballs ship it there; CI publishes it alongside the temps binary).
     fn stage_vm_agent(&self, dirs: &Dirs) -> anyhow::Result<()> {
-        let source = self
-            .vm_agent_bin
-            .clone()
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(|d| d.join("temps-vm-agent")))
-                    .filter(|p| p.exists())
-            });
+        let source = self.vm_agent_bin.clone().or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|d| d.join("temps-vm-agent")))
+                .filter(|p| p.exists())
+        });
         let dest = dirs.bin.join("temps-vm-agent");
         match source {
             Some(src) if src.exists() => {
@@ -663,10 +658,16 @@ impl FirecrackerSetupCommand {
         if dest.exists() {
             let data = std::fs::read(&dest)?;
             if sha256_hex(&data) == expected_sha {
-                pass("Guest kernel", format!("vmlinux-{} present", KERNEL_VERSION));
+                pass(
+                    "Guest kernel",
+                    format!("vmlinux-{} present", KERNEL_VERSION),
+                );
                 return Ok(());
             }
-            warn("Guest kernel", "Digest mismatch on existing file, re-downloading");
+            warn(
+                "Guest kernel",
+                "Digest mismatch on existing file, re-downloading",
+            );
         }
 
         let url = format!("{}/{}/vmlinux-{}", KERNEL_BASE, arch, KERNEL_VERSION);
@@ -770,6 +771,55 @@ impl FirecrackerSetupCommand {
         )?;
         pass("NAT", format!("Masquerade for {} installed", subnet));
 
+        // Guest isolation (defense-in-depth; the full egress-scoping story is
+        // ADR-013's credential proxy). Inserted at the TOP of FORWARD so they
+        // beat the broad `-i bridge ACCEPT` above. Internet egress is
+        // unaffected — these only drop the dangerous internal paths:
+        //  - cloud instance metadata (169.254.169.254) — credential theft
+        //  - the rest of link-local
+        for dst in ["169.254.169.254/32", "169.254.0.0/16"] {
+            iptables_insert(
+                "filter",
+                "FORWARD",
+                &[
+                    "-i".to_string(),
+                    BRIDGE_NAME.to_string(),
+                    "-d".to_string(),
+                    dst.to_string(),
+                    "-j".to_string(),
+                    "DROP".to_string(),
+                ],
+            )?;
+        }
+        // Guest -> host: the guest only needs the host as a router (FORWARD),
+        // never as a service endpoint, so drop traffic destined TO the host
+        // from the bridge. Established replies are allowed first.
+        iptables_insert(
+            "filter",
+            "INPUT",
+            &[
+                "-i".to_string(),
+                BRIDGE_NAME.to_string(),
+                "-j".to_string(),
+                "DROP".to_string(),
+            ],
+        )?;
+        iptables_insert(
+            "filter",
+            "INPUT",
+            &[
+                "-i".to_string(),
+                BRIDGE_NAME.to_string(),
+                "-m".to_string(),
+                "conntrack".to_string(),
+                "--ctstate".to_string(),
+                "RELATED,ESTABLISHED".to_string(),
+                "-j".to_string(),
+                "ACCEPT".to_string(),
+            ],
+        )?;
+        pass("Guest isolation", "Metadata + guest→host blocked");
+
         // Persistent TAP pool. Owned by the operating user so the (non-root)
         // server process — and Firecracker under it — can attach VMs to the
         // bridge without privileges. One TAP per concurrent networked VM.
@@ -780,11 +830,19 @@ impl FirecrackerSetupCommand {
             if !Path::new("/sys/class/net").join(&tap).exists() {
                 run_cmd(
                     "ip",
-                    &["tuntap", "add", "dev", &tap, "mode", "tap", "user", &tap_user],
+                    &[
+                        "tuntap", "add", "dev", &tap, "mode", "tap", "user", &tap_user,
+                    ],
                 )?;
                 created += 1;
             }
             run_cmd("ip", &["link", "set", &tap, "master", BRIDGE_NAME])?;
+            // Isolate ports from each other so one sandbox can't reach another
+            // over the shared bridge (they can still reach the host bridge IP
+            // for routing). `bridge` may be absent on minimal hosts — the
+            // metadata/host DROP rules above are the load-bearing controls, so
+            // treat isolation as best-effort.
+            let _ = run_cmd("bridge", &["link", "set", "dev", &tap, "isolated", "on"]);
             run_cmd("ip", &["link", "set", &tap, "up"])?;
         }
         pass(
@@ -813,9 +871,10 @@ impl FirecrackerSetupCommand {
         if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
             for line in passwd.lines() {
                 let fields: Vec<&str> = line.split(':').collect();
-                if let (Some(name), Some(uid)) =
-                    (fields.first(), fields.get(2).and_then(|u| u.parse::<u32>().ok()))
-                {
+                if let (Some(name), Some(uid)) = (
+                    fields.first(),
+                    fields.get(2).and_then(|u| u.parse::<u32>().ok()),
+                ) {
                     if range.contains(&uid) {
                         collisions.push(format!("{} (uid {})", name, uid));
                     }
@@ -991,6 +1050,45 @@ impl FirecrackerSetupCommand {
                     "ACCEPT".to_string(),
                 ],
             );
+            // Guest-isolation rules added by the network stage.
+            for dst in ["169.254.169.254/32", "169.254.0.0/16"] {
+                iptables_remove(
+                    "filter",
+                    "FORWARD",
+                    &[
+                        "-i".to_string(),
+                        BRIDGE_NAME.to_string(),
+                        "-d".to_string(),
+                        dst.to_string(),
+                        "-j".to_string(),
+                        "DROP".to_string(),
+                    ],
+                );
+            }
+            iptables_remove(
+                "filter",
+                "INPUT",
+                &[
+                    "-i".to_string(),
+                    BRIDGE_NAME.to_string(),
+                    "-j".to_string(),
+                    "DROP".to_string(),
+                ],
+            );
+            iptables_remove(
+                "filter",
+                "INPUT",
+                &[
+                    "-i".to_string(),
+                    BRIDGE_NAME.to_string(),
+                    "-m".to_string(),
+                    "conntrack".to_string(),
+                    "--ctstate".to_string(),
+                    "RELATED,ESTABLISHED".to_string(),
+                    "-j".to_string(),
+                    "ACCEPT".to_string(),
+                ],
+            );
             let mut taps_removed = 0u32;
             // Sweep generously past the configured count — a prior setup may
             // have created more taps than the current flag value.
@@ -1007,7 +1105,10 @@ impl FirecrackerSetupCommand {
             let _ = std::fs::remove_file("/etc/sysctl.d/99-temps-firecracker.conf");
             pass(
                 "Network",
-                format!("Bridge, {} TAPs, NAT rules, and sysctl removed", taps_removed),
+                format!(
+                    "Bridge, {} TAPs, NAT rules, and sysctl removed",
+                    taps_removed
+                ),
             );
         } else if bridge_exists() {
             warn(
@@ -1120,10 +1221,7 @@ async fn build_smoke_rootfs(smoke_dir: &Path) -> anyhow::Result<PathBuf> {
         .arg("16384")
         .output()?;
     if !out.status.success() {
-        anyhow::bail!(
-            "mkfs.ext4 failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        anyhow::bail!("mkfs.ext4 failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     Ok(img)
 }
@@ -1231,10 +1329,11 @@ fn user_in_kvm_group(user: &str) -> bool {
 fn find_in_path(bin: &str) -> Option<PathBuf> {
     let path = std::env::var("PATH").unwrap_or_default();
     // sbin dirs are often absent from non-root PATHs but the tools live there
-    let candidates = path
-        .split(':')
-        .map(PathBuf::from)
-        .chain(["/usr/sbin", "/sbin", "/usr/local/sbin"].iter().map(PathBuf::from));
+    let candidates = path.split(':').map(PathBuf::from).chain(
+        ["/usr/sbin", "/sbin", "/usr/local/sbin"]
+            .iter()
+            .map(PathBuf::from),
+    );
     for dir in candidates {
         let p = dir.join(bin);
         if p.is_file() {
@@ -1297,7 +1396,12 @@ fn run_cmd(bin: &str, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn iptables_rule_args<'a>(table: &'a str, action: &'a str, chain: &'a str, rule: &'a [String]) -> Vec<&'a str> {
+fn iptables_rule_args<'a>(
+    table: &'a str,
+    action: &'a str,
+    chain: &'a str,
+    rule: &'a [String],
+) -> Vec<&'a str> {
     let mut args = vec!["-t", table, action, chain];
     args.extend(rule.iter().map(|s| s.as_str()));
     args
@@ -1305,8 +1409,8 @@ fn iptables_rule_args<'a>(table: &'a str, action: &'a str, chain: &'a str, rule:
 
 /// Append an iptables rule unless an identical one exists (`-C` probe).
 fn iptables_ensure(table: &str, chain: &str, rule: &[String]) -> anyhow::Result<()> {
-    let iptables = find_in_path("iptables")
-        .ok_or_else(|| anyhow::anyhow!("iptables not found on PATH"))?;
+    let iptables =
+        find_in_path("iptables").ok_or_else(|| anyhow::anyhow!("iptables not found on PATH"))?;
     let check = std::process::Command::new(&iptables)
         .args(iptables_rule_args(table, "-C", chain, rule))
         .output()?;
@@ -1319,6 +1423,31 @@ fn iptables_ensure(table: &str, chain: &str, rule: &[String]) -> anyhow::Result<
     if !add.status.success() {
         anyhow::bail!(
             "iptables -t {} -A {} failed: {}",
+            table,
+            chain,
+            String::from_utf8_lossy(&add.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Insert a rule at the TOP of a chain unless already present. Used for the
+/// guest-isolation DROP rules, which must precede the broad forward-ACCEPT.
+fn iptables_insert(table: &str, chain: &str, rule: &[String]) -> anyhow::Result<()> {
+    let iptables =
+        find_in_path("iptables").ok_or_else(|| anyhow::anyhow!("iptables not found on PATH"))?;
+    let check = std::process::Command::new(&iptables)
+        .args(iptables_rule_args(table, "-C", chain, rule))
+        .output()?;
+    if check.status.success() {
+        return Ok(());
+    }
+    let add = std::process::Command::new(&iptables)
+        .args(iptables_rule_args(table, "-I", chain, rule))
+        .output()?;
+    if !add.status.success() {
+        anyhow::bail!(
+            "iptables -t {} -I {} failed: {}",
             table,
             chain,
             String::from_utf8_lossy(&add.stderr).trim()

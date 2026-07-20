@@ -1722,6 +1722,7 @@ mod tests {
                 cpu_limit: 8.0,
                 memory_limit_mb: 16_384,
                 network_mode: "restricted".into(),
+                sandbox_backend: None,
             },
             ..Default::default()
         };
