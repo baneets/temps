@@ -594,11 +594,11 @@ mod tests {
     fn sandbox_url_trims_trailing_slash() {
         assert_eq!(
             sandbox_url("http://localhost:3001/", ""),
-            "http://localhost:3001/v1/sandbox"
+            "http://localhost:3001/v1/sandboxes"
         );
         assert_eq!(
             sandbox_url("http://localhost:3001", "/sbx_a"),
-            "http://localhost:3001/v1/sandbox/sbx_a"
+            "http://localhost:3001/v1/sandboxes/sbx_a"
         );
     }
 
@@ -606,7 +606,7 @@ mod tests {
     fn sandbox_url_passes_subpath_untouched() {
         assert_eq!(
             sandbox_url("https://api.example/", "/sbx_a/exec"),
-            "https://api.example/v1/sandbox/sbx_a/exec"
+            "https://api.example/v1/sandboxes/sbx_a/exec"
         );
     }
 
