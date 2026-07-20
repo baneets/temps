@@ -1176,8 +1176,12 @@ impl Analytics for AnalyticsService {
                 -- never written). Counted after LIMIT via
                 -- idx_proxy_logs_session_id so this does at most $2 index
                 -- lookups; a NULL session_id matches nothing and yields 0.
+                -- The project_id guard is defense-in-depth (session ids are
+                -- globally unique PKs already); the IS NULL arm keeps proxy
+                -- rows written before project attribution.
                 (SELECT COUNT(*) FROM proxy_logs pl
-                 WHERE pl.session_id = limited.session_id) as requests_count
+                 WHERE pl.session_id = limited.session_id
+                   AND (pl.project_id IS NULL OR pl.project_id = $3)) as requests_count
             FROM (
                 SELECT
                     session_id,
@@ -1224,7 +1228,11 @@ impl Analytics for AnalyticsService {
         let results = SessionResult::find_by_statement(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
             sql_query,
-            vec![visitor_id.into(), (limit_val as i64).into()],
+            vec![
+                visitor_id.into(),
+                (limit_val as i64).into(),
+                visitor.project_id.into(),
+            ],
         ))
         .all(self.db.as_ref())
         .await?;
