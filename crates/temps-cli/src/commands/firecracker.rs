@@ -705,9 +705,7 @@ impl FirecrackerSetupCommand {
             if allow_defer {
                 warn(
                     "Deferred",
-                    format!(
-                        "Network stage needs root. Run: sudo temps firecracker setup --network-only"
-                    ),
+                    "Network stage needs root. Run: sudo temps firecracker setup --network-only",
                 );
                 return Ok(1);
             }
