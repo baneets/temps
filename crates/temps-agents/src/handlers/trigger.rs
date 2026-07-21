@@ -434,6 +434,7 @@ pub struct SandboxStatusResponse {
     pub image_ready: bool,
     pub image_name: String,
     pub error: Option<String>,
+    pub firecracker_available: bool,
 }
 
 #[utoipa::path(
@@ -483,6 +484,7 @@ pub async fn get_sandbox_status(
         image_ready,
         image_name,
         error,
+        firecracker_available: false,
     }))
 }
 
@@ -519,11 +521,21 @@ pub async fn get_global_sandbox_status(
         )
     };
 
+    let data_dir = std::env::var("TEMPS_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".temps")
+        });
+    let firecracker_available =
+        crate::sandbox::firecracker::is_firecracker_available(&data_dir).await;
+
     Ok(Json(SandboxStatusResponse {
         docker_available,
         image_ready,
         image_name,
         error,
+        firecracker_available,
     }))
 }
 

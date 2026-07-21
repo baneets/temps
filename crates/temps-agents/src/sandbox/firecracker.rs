@@ -1281,6 +1281,31 @@ fn dir_size(root: &Path) -> u64 {
     total
 }
 
+/// Check whether the Firecracker backend is ready on this host given the
+/// Temps data directory. Mirrors the logic in `FirecrackerSandboxProvider::is_available`
+/// without requiring a fully-constructed provider — used by the settings
+/// health endpoint so the UI can report backend availability without
+/// instantiating the full agent executor.
+pub async fn is_firecracker_available(data_dir: &Path) -> bool {
+    let config = FirecrackerSandboxConfig::from_data_dir(data_dir.to_path_buf());
+    let state_ok = std::fs::read(config.fc_root().join("state.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .is_some_and(|s| s["smoke_ok"].as_bool().unwrap_or(false));
+    state_ok
+        && config.firecracker_bin().exists()
+        && config.agent_bin().exists()
+        && std::fs::read_dir(config.kernel_glob_dir())
+            .ok()
+            .and_then(|mut d| d.next())
+            .is_some()
+        && std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
