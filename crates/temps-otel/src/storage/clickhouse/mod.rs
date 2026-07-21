@@ -603,6 +603,14 @@ struct ChMetricBucketRow {
     series_values: Vec<String>,
 }
 
+/// Typed empty array used when a metrics query has no `group_by` labels.
+///
+/// A bare ClickHouse `[]` literal can be exposed as `Array(Nothing)` in the
+/// response header. The Rust ClickHouse client cannot decode that element type
+/// into `Vec<String>`, so empty arrays projected into typed rows must carry a
+/// concrete element type explicitly.
+const EMPTY_STRING_ARRAY_SQL: &str = "CAST([], 'Array(String)')";
+
 /// Row of the temporality-aware histogram sub-aggregation (one per
 /// bucket × grouped-series). Matched back to [`ChMetricBucketRow`] by
 /// `(bucket_ms, series_values)`.
@@ -2151,7 +2159,7 @@ impl OtelStorage for ClickHouseOtelStorage {
         // Grouped label values as an Array(String), in group_by order. CH binds
         // the key via the `?` map-index parameter, never string interpolation.
         let group_select = if query.group_by.is_empty() {
-            "[] AS series_values".to_string()
+            format!("{EMPTY_STRING_ARRAY_SQL} AS series_values")
         } else {
             let parts: Vec<String> = query
                 .group_by
@@ -2168,7 +2176,7 @@ impl OtelStorage for ClickHouseOtelStorage {
         // The grouped-label array WITHOUT the `AS series_values` alias, for reuse
         // inside the histogram sub-aggregation's projection.
         let group_array = if query.group_by.is_empty() {
-            "[]".to_string()
+            EMPTY_STRING_ARRAY_SQL.to_string()
         } else {
             let parts: Vec<String> = query
                 .group_by
@@ -2951,6 +2959,12 @@ mod tests {
         let err = ::clickhouse::error::Error::BadResponse("timeout".into());
         let otel_err = ch_query_err("query_trace_summaries", err);
         assert!(otel_err.to_string().contains("query_trace_summaries"));
+    }
+
+    #[test]
+    fn empty_metric_series_array_has_explicit_clickhouse_type() {
+        assert_eq!(EMPTY_STRING_ARRAY_SQL, "CAST([], 'Array(String)')");
+        assert_ne!(EMPTY_STRING_ARRAY_SQL, "[]");
     }
 
     // ── Metric row tests ────────────────────────────────────────────────────

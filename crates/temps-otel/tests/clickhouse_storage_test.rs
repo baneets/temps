@@ -29,6 +29,11 @@ use temps_otel::types::{
     AggregationTemporality, MetricAggregation, MetricPoint, MetricQuery, MetricType, ResourceInfo,
 };
 
+#[derive(::clickhouse::Row, serde::Deserialize)]
+struct ChTypeNameRow {
+    type_name: String,
+}
+
 /// Container handle + a connected `ClickHouseOtelStorage`. Returns `None` when
 /// Docker is unavailable so the test can skip without failing CI.
 async fn setup() -> Option<(ClickHouseOtelStorage, Box<dyn std::any::Any + Send>)> {
@@ -38,7 +43,11 @@ async fn setup() -> Option<(ClickHouseOtelStorage, Box<dyn std::any::Any + Send>
         GenericImage, ImageExt,
     };
 
-    let image = GenericImage::new("clickhouse/clickhouse-server", "24.8")
+    // This storage suite exercises the production-generation ClickHouse used
+    // by the schema benchmarks. decode_to_store_test remains pinned to 24.8,
+    // so together they cover both ends of the supported server range. Newer
+    // ClickHouse versions expose bare empty arrays as Array(Nothing).
+    let image = GenericImage::new("clickhouse/clickhouse-server", "26.2.5")
         .with_exposed_port(ContainerPort::Tcp(8123))
         // The clickhouse-server image writes "Ready for connections" only to its
         // in-container log file — never to stdout/stderr — so a log-message wait
@@ -52,7 +61,7 @@ async fn setup() -> Option<(ClickHouseOtelStorage, Box<dyn std::any::Any + Send>
         .with_env_var("CLICKHOUSE_DB", "temps_otel_test")
         // Do NOT set CLICKHOUSE_USER=default (the image's user-init then rejects
         // the pre-existing default user) and do NOT use an empty password (an
-        // empty CLICKHOUSE_PASSWORD leaves `default` unauthenticatable in 24.8).
+        // empty CLICKHOUSE_PASSWORD leaves `default` unauthenticatable).
         .with_env_var("CLICKHOUSE_PASSWORD", "test");
 
     let container = match image.start().await {
@@ -99,6 +108,16 @@ async fn setup() -> Option<(ClickHouseOtelStorage, Box<dyn std::any::Any + Send>
         eprintln!("Skipping ClickHouse OTel metrics test: server never became ready ({last_err})");
         return None;
     }
+
+    // Prove this test server exposes the production failure mode. A regression
+    // to a bare [] projection will therefore fail when the clickhouse client
+    // parses the Array(Nothing) response header into a typed Vec<T> field.
+    let empty_array_type = probe
+        .query("SELECT toTypeName([]) AS type_name")
+        .fetch_one::<ChTypeNameRow>()
+        .await
+        .expect("query empty-array ClickHouse type");
+    assert_eq!(empty_array_type.type_name, "Array(Nothing)");
 
     // Apply OTel CH migrations (spans + metrics). This MUST succeed — it is the
     // entire reason for the test. Assert loudly on failure.
