@@ -506,6 +506,7 @@ export type AgentSandboxSettingsMasked = {
         [key: string]: ProviderConfigMasked;
     };
     runtime: string;
+    sandbox_backend: string;
 };
 
 export type AggregatedBucketItem = {
@@ -13246,6 +13247,7 @@ export type SandboxRoute = {
 export type SandboxStatusResponse = {
     docker_available: boolean;
     error?: string | null;
+    firecracker_available: boolean;
     image_name: string;
     image_ready: boolean;
 };

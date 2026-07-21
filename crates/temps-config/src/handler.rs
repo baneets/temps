@@ -226,6 +226,7 @@ pub struct AgentSandboxSettingsMasked {
     pub cpu_limit: f64,
     pub memory_limit_mb: u64,
     pub network_mode: String,
+    pub sandbox_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -342,6 +343,10 @@ impl From<AppSettings> for AppSettingsResponse {
                 cpu_limit: settings.agent_sandbox.cpu_limit,
                 memory_limit_mb: settings.agent_sandbox.memory_limit_mb,
                 network_mode: settings.agent_sandbox.network_mode,
+                sandbox_backend: settings
+                    .agent_sandbox
+                    .sandbox_backend
+                    .unwrap_or_else(|| "docker".to_string()),
             },
             ai_config: settings.ai_config,
             preview_gateway: PreviewGatewaySettingsMasked {
@@ -1218,6 +1223,19 @@ async fn update_settings(
                      the save was aborted to avoid wiping them. Retry the save; if \
                      this persists, check database connectivity: {}",
                     e
+                ))
+                .build());
+        }
+    }
+
+    if let Some(ref backend) = settings.agent_sandbox.sandbox_backend {
+        let backend = backend.trim();
+        if backend != "docker" && backend != "firecracker" {
+            return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+                .title("Invalid Sandbox Backend")
+                .detail(format!(
+                    "sandbox_backend must be \"docker\" or \"firecracker\", got \"{}\"",
+                    backend
                 ))
                 .build());
         }

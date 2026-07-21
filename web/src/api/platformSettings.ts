@@ -78,6 +78,7 @@ export interface AgentSandboxSettings {
   cpu_limit: number
   memory_limit_mb: number
   network_mode: string
+  sandbox_backend?: string
 }
 
 export interface PreviewGatewaySettings {
