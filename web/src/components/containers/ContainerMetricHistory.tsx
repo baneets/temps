@@ -13,6 +13,7 @@ interface ContainerMetricHistoryProps {
   format: (value: number) => string
   currentValue?: number | null
   hideWithoutHistory?: boolean
+  enabled?: boolean
   className?: string
 }
 
@@ -26,6 +27,7 @@ export function ContainerMetricHistory({
   format,
   currentValue,
   hideWithoutHistory = false,
+  enabled = true,
   className,
 }: ContainerMetricHistoryProps) {
   const { data } = useQuery({
@@ -39,10 +41,12 @@ export function ContainerMetricHistory({
     }),
     staleTime: 30_000,
     refetchInterval: 30_000,
+    enabled,
     // Metrics store disabled -> the endpoint returns 503; avoid retry spam.
     retry: false,
   })
 
+  if (!enabled) return null
   if (hideWithoutHistory && !data?.length) return null
 
   const values = buildMetricHistorySeries(data, currentValue)
@@ -54,6 +58,7 @@ export function ContainerMetricHistory({
         'flex w-24 shrink-0 flex-col items-stretch gap-0.5',
         className
       )}
+      role="img"
       aria-label={`${label} usage over the last hour`}
     >
       <MetricSparkline data={values} height={16} />

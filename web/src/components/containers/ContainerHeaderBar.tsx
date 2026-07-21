@@ -128,26 +128,28 @@ export function ContainerHeaderBar({
               {(metrics?.restart_count ?? 0) > 0 && (
                 <RestartCountChip count={metrics?.restart_count ?? 0} />
               )}
+              <ContainerMetricHistory
+                projectId={parseInt(projectId)}
+                environmentId={parseInt(environmentId)}
+                containerId={selectedContainer?.container_id ?? ''}
+                metric="container.cpu_percent"
+                label="CPU"
+                currentValue={metrics?.cpu_percent}
+                format={(value) => `${value.toFixed(1)}%`}
+                enabled={Boolean(isRunning && selectedContainer)}
+              />
+              <ContainerMetricHistory
+                projectId={parseInt(projectId)}
+                environmentId={parseInt(environmentId)}
+                containerId={selectedContainer?.container_id ?? ''}
+                metric="container.memory_used_bytes"
+                label="Mem"
+                currentValue={metrics?.memory_bytes}
+                format={formatBytes}
+                enabled={Boolean(isRunning && selectedContainer)}
+              />
               {isRunning && metrics && (
                 <>
-                  <ContainerMetricHistory
-                    projectId={parseInt(projectId)}
-                    environmentId={parseInt(environmentId)}
-                    containerId={selectedContainer.container_id}
-                    metric="container.cpu_percent"
-                    label="CPU"
-                    currentValue={metrics.cpu_percent}
-                    format={(value) => `${value.toFixed(1)}%`}
-                  />
-                  <ContainerMetricHistory
-                    projectId={parseInt(projectId)}
-                    environmentId={parseInt(environmentId)}
-                    containerId={selectedContainer.container_id}
-                    metric="container.memory_used_bytes"
-                    label="Mem"
-                    currentValue={metrics.memory_bytes}
-                    format={formatBytes}
-                  />
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
                     <ArrowDown className="size-3.5" aria-hidden="true" />
                     <span>{formatBytes(metrics.network_rx_rate)}/s</span>

@@ -204,30 +204,28 @@ function ContainerRow({
         </div>
       </div>
 
-      {running && (
-        <>
-          <ContainerMetricHistory
-            projectId={project.id}
-            environmentId={parseInt(environmentId)}
-            containerId={container.container_id}
-            metric="container.cpu_percent"
-            label="CPU"
-            format={(v) => `${v.toFixed(1)}%`}
-            hideWithoutHistory
-            className="hidden lg:flex"
-          />
-          <ContainerMetricHistory
-            projectId={project.id}
-            environmentId={parseInt(environmentId)}
-            containerId={container.container_id}
-            metric="container.memory_used_bytes"
-            label="Mem"
-            format={formatBytes}
-            hideWithoutHistory
-            className="hidden lg:flex"
-          />
-        </>
-      )}
+      <ContainerMetricHistory
+        projectId={project.id}
+        environmentId={parseInt(environmentId)}
+        containerId={container.container_id}
+        metric="container.cpu_percent"
+        label="CPU"
+        format={(v) => `${v.toFixed(1)}%`}
+        hideWithoutHistory
+        enabled={running}
+        className="hidden lg:flex"
+      />
+      <ContainerMetricHistory
+        projectId={project.id}
+        environmentId={parseInt(environmentId)}
+        containerId={container.container_id}
+        metric="container.memory_used_bytes"
+        label="Mem"
+        format={formatBytes}
+        hideWithoutHistory
+        enabled={running}
+        className="hidden lg:flex"
+      />
 
       <div
         className="flex items-center gap-1 shrink-0"
