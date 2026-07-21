@@ -50,4 +50,4 @@ reqwest = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
-testcontainers = { workspace = true }
+testcontainers = { workspace = true, features = ["http_wait_plain"] }

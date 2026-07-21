@@ -732,7 +732,7 @@ impl ClickhouseMetricsStore {
         // metric's full history before the LIMIT.
         let sql = format!(
             "SELECT min(k) AS min_keys FROM ( \
-               SELECT length(JSONExtractKeys(labels)) AS k \
+               SELECT toInt64(length(JSONExtractKeys(labels))) AS k \
                FROM service_metrics \
                WHERE source_kind = ? AND source_id = ? AND name = '{nm}' \
                  AND time > (SELECT max(time) FROM service_metrics \
@@ -756,7 +756,17 @@ impl ClickhouseMetricsStore {
             // No rows => min over empty set is 0 in CH; that still yields a
             // harmless `= 0` filter. We only treat a query error as `None`.
             Ok(r) => Some(r.min_keys),
-            Err(_) => None,
+            Err(error) => {
+                warn!(
+                    operation = "min_label_key_count",
+                    source_kind,
+                    source_id,
+                    metric_name = name,
+                    reason = %error,
+                    "ClickHouse label-count query failed; range query will use all label series"
+                );
+                None
+            }
         }
     }
 }
@@ -769,6 +779,71 @@ mod tests {
     use super::*;
     use crate::store::{MetricKind, SourceKind};
     use std::collections::HashMap;
+
+    async fn setup_clickhouse_store(
+    ) -> Option<(ClickhouseMetricsStore, Box<dyn std::any::Any + Send>)> {
+        use testcontainers::{
+            core::{wait::HttpWaitStrategy, ContainerPort, WaitFor},
+            runners::AsyncRunner,
+            GenericImage, ImageExt,
+        };
+
+        let image = GenericImage::new("clickhouse/clickhouse-server", "26.2.5")
+            .with_exposed_port(ContainerPort::Tcp(8123))
+            .with_wait_for(WaitFor::http(
+                HttpWaitStrategy::new("/ping")
+                    .with_port(ContainerPort::Tcp(8123))
+                    .with_expected_status_code(200u16),
+            ))
+            .with_env_var("CLICKHOUSE_DB", "temps_metrics_test")
+            .with_env_var("CLICKHOUSE_PASSWORD", "test");
+
+        let container = match image.start().await {
+            Ok(container) => container,
+            Err(error) => {
+                eprintln!("Skipping ClickHouse metrics test: cannot start container ({error})");
+                return None;
+            }
+        };
+        let host_port = match container.get_host_port_ipv4(8123).await {
+            Ok(port) => port,
+            Err(error) => {
+                eprintln!("Skipping ClickHouse metrics test: cannot get host port ({error})");
+                return None;
+            }
+        };
+
+        let store = ClickhouseMetricsStore::new(ClickHouseMetricsConfig::new(
+            format!("http://127.0.0.1:{host_port}"),
+            "temps_metrics_test",
+            "default",
+            "test",
+        ));
+
+        let mut last_error = String::new();
+        for _ in 0..30 {
+            match store.client().query("SELECT 1").execute().await {
+                Ok(()) => {
+                    last_error.clear();
+                    break;
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        if !last_error.is_empty() {
+            eprintln!("Skipping ClickHouse metrics test: server never became ready ({last_error})");
+            return None;
+        }
+
+        crate::store::clickhouse_migrations::apply_migrations(store.client(), "temps_metrics_test")
+            .await
+            .expect("apply metrics ClickHouse migrations");
+
+        Some((store, Box::new(container)))
+    }
 
     fn point(name: &str, value: f64, kind: MetricKind) -> MetricPoint {
         let mut labels = HashMap::new();
@@ -785,6 +860,54 @@ mod tests {
             node_id: Some(3),
             labels,
         }
+    }
+
+    #[tokio::test]
+    async fn clickhouse_range_uses_the_fewest_label_key_series() {
+        let Some((store, _container)) = setup_clickhouse_store().await else {
+            return;
+        };
+
+        let timestamp = Utc::now();
+        let mut aggregate = point("pg.connections_active", 10.0, MetricKind::Gauge);
+        aggregate.time = timestamp;
+        aggregate.labels.clear();
+
+        let mut per_database = point("pg.connections_active", 100.0, MetricKind::Gauge);
+        per_database.time = timestamp;
+        per_database.labels.clear();
+        per_database.labels.insert("datname".into(), "app".into());
+
+        store
+            .write_batch(vec![aggregate, per_database])
+            .await
+            .expect("insert aggregate and labelled metric fixtures");
+
+        assert_eq!(
+            store
+                .min_label_key_count("database", 7, "pg.connections_active")
+                .await,
+            Some(0),
+            "ClickHouse UInt64 label counts must decode into the signed query filter"
+        );
+
+        let values = store
+            .query_range(RangeQuery {
+                source_kind: SourceKind::Database,
+                source_id: 7,
+                name: "pg.connections_active".to_string(),
+                from: timestamp - chrono::Duration::minutes(1),
+                to: timestamp + chrono::Duration::minutes(1),
+                step: chrono::Duration::minutes(1),
+                monotonic: false,
+            })
+            .await
+            .expect("query aggregate metric series");
+        assert_eq!(values.len(), 1);
+        assert_eq!(
+            values[0].1, 10.0,
+            "labelled rows must not blend into aggregate series"
+        );
     }
 
     #[test]
