@@ -1,10 +1,8 @@
 import { ContainerInfoResponse, ProjectResponse } from '@/api/client'
 import {
-  containerMetricsGetHistoryOptions,
   getContainerMetricsOptions,
   listContainersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
-import { MetricSparkline } from '@/components/charts/metric-sparkline'
 import { formatCpuUsage } from '@/lib/cpu-format'
 import {
   DropdownMenu,
@@ -28,6 +26,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { ContainerMetricHistory } from './ContainerMetricHistory'
 
 interface ContainerListProps {
   project: ProjectResponse
@@ -207,21 +206,25 @@ function ContainerRow({
 
       {running && (
         <>
-          <HistorySparkline
-            project={project}
-            environmentId={environmentId}
+          <ContainerMetricHistory
+            projectId={project.id}
+            environmentId={parseInt(environmentId)}
             containerId={container.container_id}
             metric="container.cpu_percent"
             label="CPU"
             format={(v) => `${v.toFixed(1)}%`}
+            hideWithoutHistory
+            className="hidden lg:flex"
           />
-          <HistorySparkline
-            project={project}
-            environmentId={environmentId}
+          <ContainerMetricHistory
+            projectId={project.id}
+            environmentId={parseInt(environmentId)}
             containerId={container.container_id}
             metric="container.memory_used_bytes"
             label="Mem"
             format={formatBytes}
+            hideWithoutHistory
+            className="hidden lg:flex"
           />
         </>
       )}
@@ -280,57 +283,6 @@ function ContainerRow({
           aria-hidden="true"
         />
       </div>
-    </div>
-  )
-}
-
-/**
- * Compact 1h sparkline + current value for one container resource metric
- * (history recorded every ~30s by the container health monitor). Renders
- * nothing when there's no history yet (metrics store disabled, container
- * just started) so rows stay clean.
- */
-function HistorySparkline({
-  project,
-  environmentId,
-  containerId,
-  metric,
-  label,
-  format,
-}: {
-  project: ProjectResponse
-  environmentId: string
-  containerId: string
-  metric: string
-  label: string
-  format: (value: number) => string
-}) {
-  const { data } = useQuery({
-    ...containerMetricsGetHistoryOptions({
-      path: {
-        project_id: project.id,
-        environment_id: parseInt(environmentId),
-        container_id: containerId,
-      },
-      query: { metric, range: '1h' },
-    }),
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-    // Metrics store disabled → the endpoint 503s; don't retry-spam.
-    retry: false,
-  })
-
-  if (!data?.length) return null
-
-  const values = data.map((p) => p.value)
-  const last = values[values.length - 1]
-
-  return (
-    <div className="hidden w-24 shrink-0 flex-col items-stretch gap-0.5 lg:flex">
-      <MetricSparkline data={values} height={16} />
-      <span className="text-right text-[10px] tabular-nums text-neutral-500 dark:text-neutral-400">
-        {label} {format(last)}
-      </span>
     </div>
   )
 }
