@@ -1169,10 +1169,13 @@ impl ProxyLogStorage for ClickHouseProxyLogStore {
         // server-derived integer (validated interval → seconds), safe to
         // interpolate; the FILL bounds are bound params. The bucket expression
         // lives in the SELECT so GROUP BY / ORDER BY / WITH FILL reference the
-        // `bucket_ms` alias.
+        // `bucket_ms` alias. ClickHouse's toUnixTimestamp returns UInt32 and
+        // multiplying by 1000 promotes it to UInt64, so cast before arithmetic
+        // to match the i64 field in ChTimeBucketRow. The FILL bounds must use
+        // the same signed type as the ORDER BY expression.
         let sql = format!(
             "SELECT \
-                toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {step} SECOND)) * 1000 AS bucket_ms, \
+                toInt64(toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {step} SECOND))) * 1000 AS bucket_ms, \
                 count() AS request_count, \
                 ifNull(avg(response_time_ms), 0) AS avg_response_time_ms, \
                 countIf(status_code >= 400) AS error_count, \
@@ -1183,8 +1186,8 @@ impl ProxyLogStorage for ClickHouseProxyLogStore {
              GROUP BY bucket_ms \
              ORDER BY bucket_ms ASC \
              WITH FILL \
-                FROM toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND)) * 1000 \
-                TO toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND)) * 1000 \
+                FROM toInt64(toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND))) * 1000 \
+                TO toInt64(toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND))) * 1000 \
                 STEP {step_ms}",
             where_clause = clauses.join(" AND "),
             step = step_secs,
@@ -1523,10 +1526,12 @@ impl ProxyLogStorage for ClickHouseProxyLogStore {
         // the Postgres path builds — the frontend relies on a continuous
         // x-axis). The empty FILL buckets come back with agent='' and count 0;
         // the Rust roll-up below treats agent='' as an x-axis-only marker,
-        // exactly like the Postgres NULL-agent spine rows.
+        // exactly like the Postgres NULL-agent spine rows. Keep the bucket and
+        // FILL bounds explicitly Int64: toUnixTimestamp otherwise produces an
+        // unsigned value that cannot decode into ChAiTimelineRow::bucket_ms.
         let sql = format!(
             "SELECT \
-                toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {step} SECOND)) * 1000 AS bucket_ms, \
+                toInt64(toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {step} SECOND))) * 1000 AS bucket_ms, \
                 bot_name AS agent, \
                 count() AS request_count \
              FROM proxy_logs FINAL \
@@ -1534,8 +1539,8 @@ impl ProxyLogStorage for ClickHouseProxyLogStore {
              GROUP BY bucket_ms, bot_name \
              ORDER BY bucket_ms ASC \
              WITH FILL \
-                FROM toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND)) * 1000 \
-                TO toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND)) * 1000 \
+                FROM toInt64(toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND))) * 1000 \
+                TO toInt64(toUnixTimestamp(toStartOfInterval(fromUnixTimestamp64Milli(?), INTERVAL {step} SECOND))) * 1000 \
                 STEP {step_ms}",
             step = step_secs,
             step_ms = step_secs * 1000,
@@ -1759,6 +1764,81 @@ fn status_class_range(class: &str) -> Option<(i16, i16)> {
 mod tests {
     use super::*;
 
+    /// Start a real ClickHouse matching the production major version. Docker
+    /// is optional for local/unit-test environments, so startup failures skip
+    /// gracefully; once the server starts, migration/query failures are real
+    /// test failures.
+    async fn setup_clickhouse_store(
+    ) -> Option<(ClickHouseProxyLogStore, Box<dyn std::any::Any + Send>)> {
+        use testcontainers::{
+            core::{wait::HttpWaitStrategy, ContainerPort, WaitFor},
+            runners::AsyncRunner,
+            GenericImage, ImageExt,
+        };
+
+        let image = GenericImage::new("clickhouse/clickhouse-server", "26.2.5")
+            .with_exposed_port(ContainerPort::Tcp(8123))
+            .with_wait_for(WaitFor::http(
+                HttpWaitStrategy::new("/ping")
+                    .with_port(ContainerPort::Tcp(8123))
+                    .with_expected_status_code(200u16),
+            ))
+            .with_env_var("CLICKHOUSE_DB", "temps_proxy_test")
+            .with_env_var("CLICKHOUSE_PASSWORD", "test");
+
+        let container = match image.start().await {
+            Ok(container) => container,
+            Err(error) => {
+                eprintln!("Skipping ClickHouse proxy-log test: cannot start container ({error})");
+                return None;
+            }
+        };
+
+        let host_port = match container.get_host_port_ipv4(8123).await {
+            Ok(port) => port,
+            Err(error) => {
+                eprintln!("Skipping ClickHouse proxy-log test: cannot get host port ({error})");
+                return None;
+            }
+        };
+
+        let store = ClickHouseProxyLogStore::new(
+            ClickHouseProxyLogConfig::new(
+                format!("http://127.0.0.1:{host_port}"),
+                "temps_proxy_test",
+                "default",
+                "test",
+            ),
+            Arc::new(temps_core::FixedRetentionResolver),
+        );
+
+        let mut last_error = String::new();
+        for _ in 0..30 {
+            match store.client().query("SELECT 1").execute().await {
+                Ok(()) => {
+                    last_error.clear();
+                    break;
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+        }
+        if !last_error.is_empty() {
+            eprintln!(
+                "Skipping ClickHouse proxy-log test: server never became ready ({last_error})"
+            );
+            return None;
+        }
+
+        crate::storage::clickhouse_migrations::apply_migrations(store.client(), "temps_proxy_test")
+            .await
+            .expect("apply proxy-log ClickHouse migrations");
+
+        Some((store, Box::new(container)))
+    }
+
     fn make_entry(request_id: &str) -> CreateProxyLogRequest {
         CreateProxyLogRequest {
             method: "GET".to_string(),
@@ -1799,6 +1879,50 @@ mod tests {
             visitor_uuid: None,
             session_uuid: None,
         }
+    }
+
+    #[tokio::test]
+    async fn clickhouse_bucket_queries_decode_signed_millisecond_timestamps() {
+        let Some((store, _container)) = setup_clickhouse_store().await else {
+            return;
+        };
+
+        let mut entry = make_entry("bucket-type-regression");
+        entry.is_bot = Some(true);
+        entry.bot_name = Some("GPTBot".to_string());
+        store
+            .write_batch(vec![entry])
+            .await
+            .expect("insert proxy-log fixture");
+
+        let start = Utc::now() - chrono::Duration::minutes(2);
+        let end = Utc::now() + chrono::Duration::minutes(2);
+        let stats = store
+            .get_time_bucket_stats(start, end, "1 minute".to_string(), None)
+            .await
+            .expect("decode time-bucket stats with signed bucket_ms");
+        assert!(
+            stats.iter().any(|bucket| bucket.request_count == 1),
+            "inserted request must appear in time-bucket stats"
+        );
+
+        let timeline = store
+            .get_ai_agent_timeline(
+                None,
+                None,
+                start,
+                end,
+                "1 minute".to_string(),
+                AiTimelineGroupBy::Agent,
+            )
+            .await
+            .expect("decode AI timeline with signed bucket_ms");
+        assert!(
+            timeline
+                .iter()
+                .any(|bucket| bucket.key == "GPTBot" && bucket.request_count == 1),
+            "inserted AI request must appear in the agent timeline"
+        );
     }
 
     #[test]
