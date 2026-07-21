@@ -12281,10 +12281,12 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "aws-smithy-http-client",
  "chrono",
  "clickhouse",
  "libc",
  "mongodb",
+ "pem",
  "redis",
  "reqwest 0.12.28",
  "sea-orm",
@@ -12298,6 +12300,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "webpki-root-certs",
 ]
 
 [[package]]
