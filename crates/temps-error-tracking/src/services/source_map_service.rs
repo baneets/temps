@@ -780,6 +780,15 @@ impl SourceMapService {
                 "Source file content cannot be empty".to_string(),
             ));
         }
+        // Reject `..` traversal components so the stored key can't be a
+        // confusing path like `~/../../etc/passwd`. Not a host-fs read (all
+        // content comes from the DB), but keeps stored keys, audit logs, and
+        // the UI honest.
+        if has_parent_dir_component(file_path) {
+            return Err(SourceMapError::Validation(format!(
+                "File path must not contain '..' path components: {file_path}"
+            )));
+        }
 
         let size_bytes = content.len() as i64;
         let checksum = {
@@ -1000,6 +1009,12 @@ impl SourceMapService {
 
 /// Number of context lines to extract above and below the error line.
 const CONTEXT_LINES: u32 = 5;
+
+/// Whether a path contains a `..` (parent-dir) component, checking both `/` and
+/// `\` separators so it also catches Windows-style paths.
+fn has_parent_dir_component(path: &str) -> bool {
+    path.split(['/', '\\']).any(|seg| seg == "..")
+}
 
 /// Escape `LIKE` metacharacters (`\`, `%`, `_`) so an attacker-controlled frame
 /// filename is matched literally by a trailing-suffix `LIKE`. PostgreSQL's
@@ -1591,6 +1606,21 @@ mod tests {
             Some("from_a_b"),
             "underscore must match literally, not as a LIKE wildcard onto aXb.go"
         );
+    }
+
+    #[test]
+    fn has_parent_dir_component_detects_traversal() {
+        for bad in ["../../etc/passwd", "a/../b", "~/../x.go", "a\\..\\b", ".."] {
+            assert!(has_parent_dir_component(bad), "expected traversal: {bad}");
+        }
+        for ok in [
+            "internal/gateway/mw.go",
+            "~/main.go",
+            "..foo/bar.go", // "..foo" is a normal segment, not ".."
+            "src/a.rs",
+        ] {
+            assert!(!has_parent_dir_component(ok), "expected clean: {ok}");
+        }
     }
 
     #[tokio::test]
