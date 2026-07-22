@@ -51,6 +51,13 @@ pub struct Model {
     /// (the default), the AI may only read data; write-action proposals are
     /// suppressed. Operators enable this per-project via the UI.
     pub ai_write_actions_enabled: bool,
+    /// Opt-in for native error-tracking source context. When true, Temps
+    /// accepts raw source-file uploads for this project and resolves native
+    /// (Go/Rust/etc.) stack frames against them so the error UI shows the
+    /// actual source code around each frame. Off by default — uploading
+    /// application source is always a deliberate choice.
+    #[sea_orm(default_value = "false")]
+    pub error_source_context_enabled: bool,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, preview environments auto-created for branches are

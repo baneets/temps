@@ -149,6 +149,7 @@ async fn setup_e2e() -> Option<(
         is_deleted: Set(false),
         is_public_repo: Set(false),
         attack_mode: Set(false),
+        error_source_context_enabled: Set(false),
         enable_preview_environments: Set(false),
         ..Default::default()
     };

@@ -561,6 +561,7 @@ mod tests {
             ai_alert_summaries_enabled: None,
             ai_debug_chat_enabled: Some(true),
             ai_write_actions_enabled: write_enabled,
+            error_source_context_enabled: false,
             enable_preview_environments: false,
             preview_envs_on_demand: false,
             preview_envs_idle_timeout_seconds: 300,

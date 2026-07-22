@@ -5,7 +5,7 @@ use sea_orm::{
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use temps_entities::source_maps;
+use temps_entities::{projects, source_files, source_maps};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -47,6 +47,32 @@ impl From<source_maps::Model> for SourceMapInfo {
             release: model.release,
             file_path: model.file_path,
             dist: model.dist,
+            size_bytes: model.size_bytes,
+            checksum: model.checksum,
+            created_at: model.created_at,
+        }
+    }
+}
+
+/// Response type for listing uploaded source files (without the content).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SourceFileInfo {
+    pub id: i32,
+    pub project_id: i32,
+    pub release: String,
+    pub file_path: String,
+    pub size_bytes: i64,
+    pub checksum: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+impl From<source_files::Model> for SourceFileInfo {
+    fn from(model: source_files::Model) -> Self {
+        Self {
+            id: model.id,
+            project_id: model.project_id,
+            release: model.release,
+            file_path: model.file_path,
             size_bytes: model.size_bytes,
             checksum: model.checksum,
             created_at: model.created_at,
@@ -337,9 +363,13 @@ impl SourceMapService {
             }
         };
 
+        // Native source-context resolution (Go/Rust/etc.) is opt-in per project.
+        // Resolved once here so we don't query the flag per frame.
+        let native_enabled = self.source_context_enabled(error_data.project_id).await;
+
         debug!(
-            "Attempting symbolication for project {} release '{}'",
-            error_data.project_id, release
+            "Attempting symbolication for project {} release '{}' (native source context: {})",
+            error_data.project_id, release, native_enabled
         );
 
         // Process each exception's stack trace
@@ -352,16 +382,26 @@ impl SourceMapService {
                     num_exceptions,
                     exception.exception_type
                 );
-                self.symbolicate_stack_trace(error_data.project_id, &release, stack_trace)
-                    .await;
+                self.symbolicate_stack_trace(
+                    error_data.project_id,
+                    &release,
+                    stack_trace,
+                    native_enabled,
+                )
+                .await;
             }
         }
 
         // Process legacy stack_trace field
         if let Some(stack_trace) = &mut error_data.stack_trace {
             debug!("Symbolicating legacy stack_trace field");
-            self.symbolicate_stack_trace(error_data.project_id, &release, stack_trace)
-                .await;
+            self.symbolicate_stack_trace(
+                error_data.project_id,
+                &release,
+                stack_trace,
+                native_enabled,
+            )
+            .await;
         }
 
         Ok(())
@@ -385,6 +425,9 @@ impl SourceMapService {
             Some(r) if !r.is_empty() => r.to_string(),
             _ => return, // No release, can't symbolicate
         };
+
+        // Native source-context resolution is opt-in per project.
+        let native_enabled = self.source_context_enabled(project_id).await;
 
         // Get mutable reference to the exception values array
         let exceptions = match data
@@ -457,6 +500,16 @@ impl SourceMapService {
                 {
                     apply_resolved_to_json(obj, resolved, &filename);
                     any_symbolicated = true;
+                } else if native_enabled && !obj.contains_key("context_line") {
+                    // Native frame: filename+lineno are already original; just
+                    // attach the source code lines from an uploaded source file.
+                    if let Some(resolved) = self
+                        .resolve_native_frame(project_id, &release, &filename, lineno)
+                        .await
+                    {
+                        apply_native_context_to_json(obj, resolved);
+                        any_symbolicated = true;
+                    }
                 }
             }
         }
@@ -479,6 +532,7 @@ impl SourceMapService {
         project_id: i32,
         release: &str,
         stack_trace: &mut serde_json::Value,
+        native_enabled: bool,
     ) {
         let frames = match stack_trace {
             serde_json::Value::Object(obj) => obj.get_mut("frames"),
@@ -525,6 +579,16 @@ impl SourceMapService {
                 .await
             {
                 apply_resolved_to_json(obj, resolved, &filename);
+            } else if native_enabled {
+                // Native frame (Go/Rust/etc.): filename+lineno are already the
+                // original coordinates, so there is nothing to un-minify — we
+                // only attach the source code lines from an uploaded source file.
+                if let Some(resolved) = self
+                    .resolve_native_frame(project_id, release, &filename, lineno)
+                    .await
+                {
+                    apply_native_context_to_json(obj, resolved);
+                }
             }
         }
     }
@@ -662,6 +726,175 @@ impl SourceMapService {
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Native source files (Go/Rust/etc.) — raw source stored per release so
+    // native stack frames (which already carry original filename+lineno) can
+    // be given source context. Reuses the same (project, release, file_path)
+    // keying, candidate generation, and `extract_source_context` slicing as
+    // the source-map path; the only difference is there is no token lookup.
+    // ---------------------------------------------------------------------
+
+    /// Whether native source-context resolution is enabled for this project.
+    /// Off by default; a single query per event keeps this off the per-frame path.
+    pub async fn source_context_enabled(&self, project_id: i32) -> bool {
+        match projects::Entity::find_by_id(project_id)
+            .select_only()
+            .column(projects::Column::ErrorSourceContextEnabled)
+            .into_tuple::<bool>()
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(enabled)) => enabled,
+            Ok(None) => false,
+            Err(e) => {
+                warn!(
+                    "Failed to read error_source_context_enabled for project {}: {}",
+                    project_id, e
+                );
+                false
+            }
+        }
+    }
+
+    /// Upload a raw source file for a release. Upserts on (project, release, file_path).
+    pub async fn upload_source_file(
+        &self,
+        project_id: i32,
+        release: &str,
+        file_path: &str,
+        content: Vec<u8>,
+    ) -> Result<SourceFileInfo, SourceMapError> {
+        if release.is_empty() {
+            return Err(SourceMapError::Validation(
+                "Release version cannot be empty".to_string(),
+            ));
+        }
+        if file_path.is_empty() {
+            return Err(SourceMapError::Validation(
+                "File path cannot be empty".to_string(),
+            ));
+        }
+        if content.is_empty() {
+            return Err(SourceMapError::Validation(
+                "Source file content cannot be empty".to_string(),
+            ));
+        }
+
+        let size_bytes = content.len() as i64;
+        let checksum = {
+            let mut hasher = Sha256::new();
+            hasher.update(&content);
+            hex::encode(hasher.finalize())
+        };
+
+        let normalized_path = normalize_file_path(file_path);
+
+        // Upsert: delete existing if present, then insert.
+        let existing = source_files::Entity::find()
+            .filter(source_files::Column::ProjectId.eq(project_id))
+            .filter(source_files::Column::Release.eq(release))
+            .filter(source_files::Column::FilePath.eq(&normalized_path))
+            .one(self.db.as_ref())
+            .await?;
+
+        if let Some(existing) = existing {
+            source_files::Entity::delete_by_id(existing.id)
+                .exec(self.db.as_ref())
+                .await?;
+        }
+
+        let new_file = source_files::ActiveModel {
+            project_id: Set(project_id),
+            release: Set(release.to_string()),
+            file_path: Set(normalized_path),
+            content: Set(content),
+            size_bytes: Set(size_bytes),
+            checksum: Set(Some(checksum)),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        };
+
+        let model = new_file.insert(self.db.as_ref()).await?;
+        Ok(SourceFileInfo::from(model))
+    }
+
+    /// List uploaded source files for a release (metadata only, no content).
+    pub async fn list_source_files(
+        &self,
+        project_id: i32,
+        release: &str,
+    ) -> Result<Vec<SourceFileInfo>, SourceMapError> {
+        let files = source_files::Entity::find()
+            .filter(source_files::Column::ProjectId.eq(project_id))
+            .filter(source_files::Column::Release.eq(release))
+            .order_by_asc(source_files::Column::FilePath)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(files.into_iter().map(SourceFileInfo::from).collect())
+    }
+
+    /// Delete every uploaded source file for a release. Returns the count removed.
+    pub async fn delete_source_files_for_release(
+        &self,
+        project_id: i32,
+        release: &str,
+    ) -> Result<u64, SourceMapError> {
+        let res = source_files::Entity::delete_many()
+            .filter(source_files::Column::ProjectId.eq(project_id))
+            .filter(source_files::Column::Release.eq(release))
+            .exec(self.db.as_ref())
+            .await?;
+        Ok(res.rows_affected)
+    }
+
+    /// Resolve source context for a native frame from an uploaded source file.
+    /// Native frames already carry original coordinates, so this only fetches
+    /// the source text and slices `CONTEXT_LINES` around `lineno`.
+    async fn resolve_native_frame(
+        &self,
+        project_id: i32,
+        release: &str,
+        filename: &str,
+        lineno: u32,
+    ) -> Option<ResolvedFrame> {
+        let candidates = generate_lookup_paths(filename);
+
+        // Phase 1: exact match against candidate paths.
+        for candidate in &candidates {
+            let file = source_files::Entity::find()
+                .filter(source_files::Column::ProjectId.eq(project_id))
+                .filter(source_files::Column::Release.eq(release))
+                .filter(source_files::Column::FilePath.eq(candidate))
+                .one(self.db.as_ref())
+                .await
+                .ok()
+                .flatten();
+            if let Some(file) = file {
+                if let Some(resolved) = build_native_resolved(&file.content, filename, lineno) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        // Phase 2: suffix match for bare basenames (e.g. "main.go").
+        if !filename.contains('/') && !filename.contains("://") {
+            let suffix_pattern = format!("%/{}", filename);
+            let file = source_files::Entity::find()
+                .filter(source_files::Column::ProjectId.eq(project_id))
+                .filter(source_files::Column::Release.eq(release))
+                .filter(source_files::Column::FilePath.like(&suffix_pattern))
+                .one(self.db.as_ref())
+                .await
+                .ok()
+                .flatten();
+            if let Some(file) = file {
+                return build_native_resolved(&file.content, filename, lineno);
+            }
+        }
+
+        None
+    }
 }
 
 /// Number of context lines to extract above and below the error line.
@@ -679,6 +912,71 @@ struct ResolvedFrame {
     pre_context: Vec<String>,
     /// Source lines after the error line (up to CONTEXT_LINES).
     post_context: Vec<String>,
+}
+
+/// Build a resolved frame for a native (already-original) stack frame by
+/// slicing source context out of raw source bytes. Returns `None` if the line
+/// is out of range so we never attach an empty/incorrect context.
+fn build_native_resolved(
+    content: &[u8],
+    original_filename: &str,
+    lineno: u32,
+) -> Option<ResolvedFrame> {
+    let source = String::from_utf8_lossy(content);
+    let (context_line, pre_context, post_context) = extract_source_context(&source, lineno);
+    // Only worth returning if we actually landed on a real source line.
+    context_line.as_ref()?;
+    Some(ResolvedFrame {
+        file: original_filename.to_string(),
+        line: lineno,
+        column: 0,
+        function: None,
+        context_line,
+        pre_context,
+        post_context,
+    })
+}
+
+/// Attach only source context to a native frame's JSON object.
+///
+/// Unlike [`apply_resolved_to_json`], this does NOT rewrite filename/lineno/
+/// function or set `symbolicated`/`original_*` — native frames already carry
+/// the correct original coordinates and function name; there is no minified
+/// original to preserve. We only add the code lines the UI renders.
+fn apply_native_context_to_json(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    resolved: ResolvedFrame,
+) {
+    if let Some(context_line) = resolved.context_line {
+        obj.insert(
+            "context_line".to_string(),
+            serde_json::Value::String(context_line),
+        );
+    }
+    if !resolved.pre_context.is_empty() {
+        obj.insert(
+            "pre_context".to_string(),
+            serde_json::Value::Array(
+                resolved
+                    .pre_context
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !resolved.post_context.is_empty() {
+        obj.insert(
+            "post_context".to_string(),
+            serde_json::Value::Array(
+                resolved
+                    .post_context
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
 }
 
 /// Extract source context (pre_context, context_line, post_context) from source content.
@@ -889,6 +1187,29 @@ mod tests {
     use std::sync::Arc;
     use temps_database::test_utils::TestDatabase;
     use temps_entities::projects;
+
+    #[test]
+    fn build_native_resolved_slices_context_around_line() {
+        let source = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
+        // Resolve line 4 ("line4"): 5 lines of context each side, clamped.
+        let resolved =
+            build_native_resolved(source.as_bytes(), "~/main.go", 4).expect("should resolve");
+        assert_eq!(resolved.context_line.as_deref(), Some("line4"));
+        assert_eq!(resolved.pre_context, vec!["line1", "line2", "line3"]);
+        assert_eq!(
+            resolved.post_context,
+            vec!["line5", "line6", "line7", "line8"]
+        );
+        // Native resolution never rewrites the filename or invents a function.
+        assert_eq!(resolved.file, "~/main.go");
+        assert_eq!(resolved.function, None);
+    }
+
+    #[test]
+    fn build_native_resolved_returns_none_for_out_of_range_line() {
+        let source = "only\ntwo";
+        assert!(build_native_resolved(source.as_bytes(), "~/main.go", 99).is_none());
+    }
 
     /// A minimal valid source map for testing.
     /// Maps line 1, col 0 of "out.js" to line 2, col 4 of "input.js", function "greet"
@@ -1268,7 +1589,7 @@ mod tests {
         });
 
         service
-            .symbolicate_stack_trace(project_id, "abc123", &mut stack_trace)
+            .symbolicate_stack_trace(project_id, "abc123", &mut stack_trace, false)
             .await;
 
         let frame = &stack_trace["frames"][0];
@@ -1319,7 +1640,7 @@ mod tests {
         });
 
         service
-            .symbolicate_stack_trace(project_id, "abc123", &mut stack_trace)
+            .symbolicate_stack_trace(project_id, "abc123", &mut stack_trace, false)
             .await;
 
         let frame = &stack_trace["frames"][0];
@@ -1563,7 +1884,7 @@ mod tests {
         });
 
         service
-            .symbolicate_stack_trace(project_id, "v1.0", &mut stack_trace)
+            .symbolicate_stack_trace(project_id, "v1.0", &mut stack_trace, false)
             .await;
 
         let frame = &stack_trace["frames"][0];

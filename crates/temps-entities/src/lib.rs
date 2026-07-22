@@ -115,6 +115,7 @@ pub mod error_alert_rules;
 pub mod error_events;
 pub mod error_groups;
 pub mod project_dsns;
+pub mod source_files;
 pub mod source_maps;
 pub mod tokenizer;
 
