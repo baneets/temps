@@ -934,19 +934,29 @@ impl SourceMapService {
             }
         }
 
-        // Phase 2: suffix match for bare basenames (e.g. "main.go").
-        if !filename.contains('/') && !filename.contains("://") {
-            let suffix_pattern = format!("%/{}", filename);
-            let file = source_files::Entity::find()
-                .filter(source_files::Column::ProjectId.eq(project_id))
-                .filter(source_files::Column::Release.eq(release))
-                .filter(source_files::Column::FilePath.like(&suffix_pattern))
-                .one(self.db.as_ref())
-                .await
-                .ok()
-                .flatten();
-            if let Some(file) = file {
-                return build_native_resolved(&file.content, filename, lineno);
+        // Phase 2: trailing-suffix match. Native build paths often carry a
+        // build-dir prefix the uploaded (module-relative) path lacks — e.g. a
+        // non-`-trimpath` Go binary reports "/src/internal/gateway/mw.go" for a
+        // file stored "~/internal/gateway/mw.go". Try progressively shorter
+        // trailing suffixes, longest (most specific) first, so we prefer the
+        // least-ambiguous match and only fall back to the bare basename last.
+        if !filename.contains("://") {
+            let normalized = filename.trim_start_matches("~/").replace('\\', "/");
+            let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+            for i in 0..segments.len() {
+                let suffix = segments[i..].join("/");
+                let pattern = format!("%/{}", suffix);
+                let file = source_files::Entity::find()
+                    .filter(source_files::Column::ProjectId.eq(project_id))
+                    .filter(source_files::Column::Release.eq(release))
+                    .filter(source_files::Column::FilePath.like(&pattern))
+                    .one(self.db.as_ref())
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(file) = file {
+                    return build_native_resolved(&file.content, filename, lineno);
+                }
             }
         }
 
@@ -1459,6 +1469,47 @@ mod tests {
             Some("three"),
             "bare filename should resolve via suffix match"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_native_source_context_build_prefixed_path() {
+        // A binary built without `-trimpath` reports the Docker build path
+        // (e.g. "/src/...") which the uploaded module-relative path lacks.
+        // The trailing-suffix match must still resolve it.
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await;
+
+        service
+            .upload_source_file(
+                project_id,
+                "v1",
+                "~/internal/gateway/middleware.go",
+                b"one\ntwo\nthree\nfour\n".to_vec(),
+            )
+            .await
+            .expect("upload source file");
+
+        let mut stack_trace = serde_json::json!({
+            "frames": [
+                { "filename": "/src/internal/gateway/middleware.go", "lineno": 3 },
+                { "filename": "/build/app/main.go", "lineno": 1 }
+            ]
+        });
+        service
+            .symbolicate_stack_trace(project_id, "v1", &mut stack_trace, true)
+            .await;
+
+        // Deep build-prefixed path resolves via the most-specific suffix.
+        assert_eq!(
+            stack_trace["frames"][0]["context_line"].as_str(),
+            Some("three"),
+            "build-prefixed path should resolve via trailing-suffix match"
+        );
+        // A prefixed path with no matching upload stays unresolved (no false hit).
+        assert!(stack_trace["frames"][1].get("context_line").is_none());
     }
 
     #[tokio::test]
