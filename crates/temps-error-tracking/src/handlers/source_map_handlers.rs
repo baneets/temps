@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -56,12 +56,19 @@ pub struct SourceMapAppState {
 }
 
 pub fn configure_source_map_routes() -> Router<Arc<SourceMapAppState>> {
+    // Body-size caps that fire at the transport layer, before the multipart
+    // extractor buffers the request into memory. The per-field checks in the
+    // handlers are defense-in-depth on top of these.
+    const SOURCE_MAP_UPLOAD_LIMIT: usize = 50 * 1024 * 1024;
+    const SOURCE_FILE_UPLOAD_LIMIT: usize = 10 * 1024 * 1024;
+
     Router::new()
         .route(
             "/projects/{project_id}/releases/{release}/source-maps",
             post(upload_source_map)
                 .get(list_source_maps)
-                .delete(delete_release_source_maps),
+                .delete(delete_release_source_maps)
+                .layer(DefaultBodyLimit::max(SOURCE_MAP_UPLOAD_LIMIT)),
         )
         .route(
             "/projects/{project_id}/source-map-releases",
@@ -76,7 +83,8 @@ pub fn configure_source_map_routes() -> Router<Arc<SourceMapAppState>> {
             "/projects/{project_id}/releases/{release}/source-files",
             post(upload_source_file)
                 .get(list_source_files)
-                .delete(delete_release_source_files),
+                .delete(delete_release_source_files)
+                .layer(DefaultBodyLimit::max(SOURCE_FILE_UPLOAD_LIMIT)),
         )
 }
 

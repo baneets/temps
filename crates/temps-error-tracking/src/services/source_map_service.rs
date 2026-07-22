@@ -628,7 +628,7 @@ impl SourceMapService {
         // Phase 2: Suffix-based match as fallback (handles bare filenames like "route.js")
         // Only attempt if the filename looks like a bare basename (no path separators, no scheme)
         if !filename.contains('/') && !filename.contains("://") {
-            let suffix_pattern = format!("%/{}", filename);
+            let suffix_pattern = format!("%/{}", escape_like(filename));
             debug!(
                 "resolve_frame: trying suffix match with pattern '{}'",
                 suffix_pattern
@@ -825,13 +825,47 @@ impl SourceMapService {
         project_id: i32,
         release: &str,
     ) -> Result<Vec<SourceFileInfo>, SourceMapError> {
+        // Project only metadata columns — never load the (up to 2 MiB) `content`
+        // blob into memory just to build a listing.
+        #[derive(FromQueryResult)]
+        struct SourceFileMetadata {
+            id: i32,
+            project_id: i32,
+            release: String,
+            file_path: String,
+            size_bytes: i64,
+            checksum: Option<String>,
+            created_at: chrono::DateTime<Utc>,
+        }
+
         let files = source_files::Entity::find()
             .filter(source_files::Column::ProjectId.eq(project_id))
             .filter(source_files::Column::Release.eq(release))
             .order_by_asc(source_files::Column::FilePath)
+            .select_only()
+            .column(source_files::Column::Id)
+            .column(source_files::Column::ProjectId)
+            .column(source_files::Column::Release)
+            .column(source_files::Column::FilePath)
+            .column(source_files::Column::SizeBytes)
+            .column(source_files::Column::Checksum)
+            .column(source_files::Column::CreatedAt)
+            .into_model::<SourceFileMetadata>()
             .all(self.db.as_ref())
             .await?;
-        Ok(files.into_iter().map(SourceFileInfo::from).collect())
+
+        Ok(files
+            .into_iter()
+            .map(|m| SourceFileInfo {
+                id: m.id,
+                project_id: m.project_id,
+                release: m.release,
+                file_path: m.file_path,
+                size_bytes: m.size_bytes,
+                checksum: m.checksum,
+                created_at: m.created_at,
+            })
+            .collect())
     }
 
     /// Delete every uploaded source file for a release. Returns the count removed.
@@ -945,7 +979,7 @@ impl SourceMapService {
             let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
             for i in 0..segments.len() {
                 let suffix = segments[i..].join("/");
-                let pattern = format!("%/{}", suffix);
+                let pattern = format!("%/{}", escape_like(&suffix));
                 let file = source_files::Entity::find()
                     .filter(source_files::Column::ProjectId.eq(project_id))
                     .filter(source_files::Column::Release.eq(release))
@@ -966,6 +1000,18 @@ impl SourceMapService {
 
 /// Number of context lines to extract above and below the error line.
 const CONTEXT_LINES: u32 = 5;
+
+/// Escape `LIKE` metacharacters (`\`, `%`, `_`) so an attacker-controlled frame
+/// filename is matched literally by a trailing-suffix `LIKE`. PostgreSQL's
+/// default `LIKE` escape character is `\`, so escaping in the bound value is
+/// sufficient (no `ESCAPE` clause needed). Without this, a filename containing
+/// `_` or `%` would match unrelated stored files and could surface the wrong
+/// file's source in the error UI.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
 
 /// A resolved stack frame with original source coordinates and source context.
 struct ResolvedFrame {
@@ -1510,6 +1556,41 @@ mod tests {
         );
         // A prefixed path with no matching upload stays unresolved (no false hit).
         assert!(stack_trace["frames"][1].get("context_line").is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_native_source_context_escapes_like_metacharacters() {
+        // A frame filename containing `_` must be matched literally by the
+        // trailing-suffix LIKE, not as a single-char wildcard that could pull an
+        // unrelated file's source into the frame.
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await;
+
+        service
+            .upload_source_file(project_id, "v1", "~/a_b.go", b"from_a_b\n".to_vec())
+            .await
+            .expect("upload a_b");
+        service
+            .upload_source_file(project_id, "v1", "~/aXb.go", b"from_aXb\n".to_vec())
+            .await
+            .expect("upload aXb");
+
+        // Build-prefixed path forces the suffix match; `_` must stay literal.
+        let mut stack_trace = serde_json::json!({
+            "frames": [ { "filename": "/src/a_b.go", "lineno": 1 } ]
+        });
+        service
+            .symbolicate_stack_trace(project_id, "v1", &mut stack_trace, true)
+            .await;
+
+        assert_eq!(
+            stack_trace["frames"][0]["context_line"].as_str(),
+            Some("from_a_b"),
+            "underscore must match literally, not as a LIKE wildcard onto aXb.go"
+        );
     }
 
     #[tokio::test]

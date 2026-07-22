@@ -155,6 +155,12 @@ fn collect_source_files(root: &Path, exts: &[String]) -> Vec<(String, PathBuf)> 
                 return;
             }
             let path = entry.path();
+            // Never follow symlinks — a repo could symlink to a host path
+            // (/etc, /proc, secrets) and exfiltrate it into stored source.
+            // `is_symlink` uses lstat, so it does not traverse the link.
+            if path.is_symlink() {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if path.is_dir() {
@@ -217,22 +223,32 @@ impl WorkflowTask for CaptureSourceFilesJob {
         };
 
         // Resolve the module root (project subdirectory within the checkout).
-        let source_root = {
-            let dir = self.project_directory.trim_matches('/');
-            if dir.is_empty() || dir == "." {
-                repo_dir.clone()
+        // `project.directory` is user-controlled, so confine it to the checkout:
+        // reject `../` traversal and symlink escapes out of the repo (the returned
+        // path is canonicalized and asserted to live under the checkout).
+        let dir = {
+            let d = self.project_directory.trim_matches('/');
+            if d.is_empty() {
+                "."
             } else {
-                repo_dir.join(dir)
+                d
             }
         };
-        if !source_root.is_dir() {
-            self.log(format!(
-                "⚠️ Source root {} not found; skipping",
-                source_root.display()
-            ))
-            .await?;
-            return Ok(JobResult::success(context));
-        }
+        let source_root = match crate::jobs::deploy_compose::canonicalize_confined_repo_path(
+            &repo_dir,
+            std::path::Path::new(dir),
+            "project_directory",
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                self.log(format!(
+                    "⚠️ Source root '{}' not usable ({}); skipping source capture",
+                    dir, e
+                ))
+                .await?;
+                return Ok(JobResult::success(context));
+            }
+        };
 
         let files = collect_source_files(&source_root, &self.extensions);
         if files.len() >= MAX_FILES {
@@ -335,5 +351,34 @@ mod tests {
 
         assert_eq!(found, vec!["internal/gateway/mw.go", "main.go"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_does_not_follow_symlinks_out_of_the_tree() {
+        let root = std::env::temp_dir().join(format!("tsf-sym-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tsf-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("real.go"), "package x").unwrap();
+        std::fs::write(outside.join("secret.go"), "SECRET").unwrap();
+        // A symlink inside the repo pointing at an outside directory must not be
+        // followed (host-file exfiltration guard).
+        std::os::unix::fs::symlink(&outside, root.join("evil")).unwrap();
+
+        let found: Vec<String> = collect_source_files(&root, &["go".to_string()])
+            .into_iter()
+            .map(|(rel, _)| rel)
+            .collect();
+
+        assert!(found.contains(&"real.go".to_string()));
+        assert!(
+            !found.iter().any(|f| f.contains("secret")),
+            "symlinked out-of-tree file must not be collected: {found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
