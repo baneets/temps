@@ -528,6 +528,20 @@ bunx @temps-sdk/cli errors source-files delete --project-id 42 --release "$CI_CO
 ```
 </CodeGroup>
 
+<Note>
+  **Compiled services (Go, Rust, …): don't hard-code the release.** Some SDKs
+  let you set the release in code (e.g. `sentry.ClientOptions{ Release: version }`).
+  If you bake a placeholder like `"dev"` into the binary, the SDK will **ignore**
+  the `SENTRY_RELEASE` Temps injects at deploy time, and your events won't line up
+  with the source you uploaded. Either:
+
+  - leave the release **unset** in code so the injected `SENTRY_RELEASE` wins, or
+  - bake the **real** commit/tag at build time, e.g. Go
+    `-ldflags "-X main.version=$VERSION"` with
+    `VERSION="${CI_COMMIT_TAG:-$CI_COMMIT_SHA}"` (and pass the same value as the
+    `--release` you upload source under).
+</Note>
+
 ---
 
 

@@ -1621,6 +1621,43 @@ impl WorkflowPlanner {
             );
         }
 
+        // Job 9: Capture source files (native symbolication — Go/Rust/etc.).
+        // Uploads raw source from the git checkout so native stack frames show
+        // source code. Opt-in per project, so it is only scheduled when the
+        // project has enabled source context (no overhead for anyone else).
+        if has_git_info && project.error_source_context_enabled {
+            let release = deployment
+                .commit_sha
+                .clone()
+                .unwrap_or_else(|| format!("deploy-{}", deployment.id));
+
+            jobs.push(JobDefinition {
+                job_id: "capture_source_files".to_string(),
+                job_type: "CaptureSourceFilesJob".to_string(),
+                name: "Capture Source Files".to_string(),
+                description: Some(
+                    "Upload application source from the checkout for native error symbolication"
+                        .to_string(),
+                ),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "project_id": project.id,
+                    "release": release,
+                    "download_job_id": "download_repo",
+                    "project_directory": project.directory,
+                    "extensions": [
+                        "go", "rs", "py", "rb", "js", "jsx", "ts", "tsx", "java", "kt",
+                        "c", "h", "cpp", "cc", "hpp", "cs", "php", "swift", "scala", "ex", "exs",
+                    ],
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added capture_source_files job to workflow (release: {})",
+                release
+            );
+        }
+
         info!(
             "Planned {} jobs for Git-based project {}",
             jobs.len(),

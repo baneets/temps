@@ -848,6 +848,63 @@ impl SourceMapService {
         Ok(res.rows_affected)
     }
 
+    /// Delete source files for releases no longer tied to an active deployment,
+    /// so uploaded source doesn't accumulate unbounded. Mirrors
+    /// [`Self::delete_stale_source_maps`] (same keep-set of active-deployment
+    /// releases). Returns the count removed.
+    pub async fn delete_stale_source_files(&self, project_id: i32) -> Result<u64, SourceMapError> {
+        use temps_entities::{deployments, environments};
+
+        let active_environments = environments::Entity::find()
+            .filter(environments::Column::ProjectId.eq(project_id))
+            .filter(environments::Column::DeletedAt.is_null())
+            .filter(environments::Column::CurrentDeploymentId.is_not_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        let active_deployment_ids: Vec<i32> = active_environments
+            .iter()
+            .filter_map(|env| env.current_deployment_id)
+            .collect();
+
+        if active_deployment_ids.is_empty() {
+            debug!(
+                "No active deployments for project {} — skipping source file cleanup",
+                project_id
+            );
+            return Ok(0);
+        }
+
+        let active_deployments = deployments::Entity::find()
+            .filter(deployments::Column::Id.is_in(active_deployment_ids))
+            .all(self.db.as_ref())
+            .await?;
+
+        let keep_releases: Vec<String> = active_deployments
+            .into_iter()
+            .map(|d| d.commit_sha.unwrap_or_else(|| format!("deploy-{}", d.id)))
+            .collect();
+
+        if keep_releases.is_empty() {
+            return Ok(0);
+        }
+
+        let result = source_files::Entity::delete_many()
+            .filter(source_files::Column::ProjectId.eq(project_id))
+            .filter(source_files::Column::Release.is_not_in(keep_releases.clone()))
+            .exec(self.db.as_ref())
+            .await?;
+
+        if result.rows_affected > 0 {
+            debug!(
+                "Cleaned up {} stale source file(s) for project {} (keeping releases: {:?})",
+                result.rows_affected, project_id, keep_releases
+            );
+        }
+
+        Ok(result.rows_affected)
+    }
+
     /// Resolve source context for a native frame from an uploaded source file.
     /// Native frames already carry original coordinates, so this only fetches
     /// the source text and slices `CONTEXT_LINES` around `lineno`.

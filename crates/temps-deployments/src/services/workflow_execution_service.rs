@@ -1264,6 +1264,70 @@ impl WorkflowExecutionService {
                 Ok(Arc::new(job))
             }
 
+            "CaptureSourceFilesJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let project_id = config
+                    .get("project_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "project_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let release = config
+                    .get("release")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig("release is required".to_string())
+                    })?
+                    .to_string();
+
+                let download_job_id = config
+                    .get("download_job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("download_repo")
+                    .to_string();
+
+                let project_directory = config
+                    .get("project_directory")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".")
+                    .to_string();
+
+                let extensions: Vec<String> = config
+                    .get("extensions")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let source_map_service = self
+                    .source_map_service
+                    .get()
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "SourceMapService not configured".to_string(),
+                        )
+                    })?
+                    .clone();
+
+                let job = crate::jobs::CaptureSourceFilesJob::new(
+                    db_job.job_id.clone(),
+                    project_id,
+                    release,
+                    download_job_id,
+                    project_directory,
+                    extensions,
+                    source_map_service,
+                )
+                .with_log_id(db_job.log_id.clone())
+                .with_log_service(self.log_service.clone());
+
+                Ok(Arc::new(job))
+            }
+
             "PersistStaticAssetsJob" => {
                 let config = db_job.job_config.as_ref().ok_or_else(|| {
                     WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
