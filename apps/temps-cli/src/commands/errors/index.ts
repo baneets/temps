@@ -174,6 +174,12 @@ const DEFAULT_SOURCE_EXTS = [
   'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'php', 'swift', 'scala', 'ex', 'exs',
 ]
 
+/// Directory names never walked by `--dir` (deps, build output, VCS metadata).
+const SKIP_DIRS = new Set([
+  '.git', 'node_modules', 'vendor', 'target', 'dist', 'build',
+  '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.temps',
+])
+
 interface DeleteResponse {
   deleted: number
 }
@@ -881,6 +887,8 @@ async function uploadSourceFileAction(options: SourceFileUploadOptions): Promise
 
   const entries = (await readdir(root, { recursive: true })) as string[]
   const relPaths = entries.filter((rel) => {
+    // Skip dependency/build/VCS directories at any depth.
+    if (rel.split(/[/\\]/).some((seg) => SKIP_DIRS.has(seg))) return false
     const ext = rel.split('.').pop()?.toLowerCase() ?? ''
     if (!exts.has(ext)) return false
     // Recursive readdir returns directories too; keep only real files.
