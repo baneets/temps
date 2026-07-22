@@ -1255,6 +1255,155 @@ mod tests {
             .id
     }
 
+    /// Flip the per-project native source-context opt-in for tests.
+    async fn set_source_context(db: &Arc<DatabaseConnection>, project_id: i32, enabled: bool) {
+        let project = projects::Entity::find_by_id(project_id)
+            .one(db.as_ref())
+            .await
+            .expect("query project")
+            .expect("project exists");
+        let mut active: projects::ActiveModel = project.into();
+        active.error_source_context_enabled = Set(enabled);
+        active
+            .update(db.as_ref())
+            .await
+            .expect("update project opt-in");
+    }
+
+    /// A native stored Sentry event with a single frame (filename + lineno, no
+    /// source context yet), shaped like the JSONB `data` column.
+    fn native_event(release: &str, filename: &str, lineno: u32) -> serde_json::Value {
+        serde_json::json!({
+            "sentry": {
+                "release": release,
+                "exception": { "values": [ {
+                    "stacktrace": { "frames": [ {
+                        "filename": filename,
+                        "function": "(*Gateway).handle",
+                        "lineno": lineno
+                    } ] }
+                } ] }
+            }
+        })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_source_context_enabled_reads_project_flag() {
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await;
+
+        // Default: off.
+        assert!(!service.source_context_enabled(project_id).await);
+        set_source_context(&db, project_id, true).await;
+        assert!(service.source_context_enabled(project_id).await);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_native_source_context_resolves_when_enabled() {
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await;
+        set_source_context(&db, project_id, true).await;
+
+        let source = "package gateway\n\nfunc middleware() {\n\tpanic(\"boom\")\n}\n";
+        service
+            .upload_source_file(
+                project_id,
+                "v1",
+                "~/internal/gateway/middleware.go",
+                source.as_bytes().to_vec(),
+            )
+            .await
+            .expect("upload source file");
+
+        // Frame points at line 4 (the panic).
+        let mut event = native_event("v1", "~/internal/gateway/middleware.go", 4);
+        service
+            .symbolicate_stored_event(project_id, &mut event)
+            .await;
+
+        let frame = &event["sentry"]["exception"]["values"][0]["stacktrace"]["frames"][0];
+        assert_eq!(
+            frame["context_line"].as_str(),
+            Some("\tpanic(\"boom\")"),
+            "native frame should get the source line. Frame: {}",
+            serde_json::to_string_pretty(frame).unwrap()
+        );
+        assert!(frame["pre_context"].is_array());
+        // Native resolution must not claim source-map symbolication or rewrite
+        // the function name — native frames are already original.
+        assert!(frame.get("symbolicated").is_none());
+        assert_eq!(frame["function"].as_str(), Some("(*Gateway).handle"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_native_source_context_skipped_when_disabled() {
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await; // opt-in defaults to false
+
+        service
+            .upload_source_file(
+                project_id,
+                "v1",
+                "~/internal/gateway/middleware.go",
+                b"a\nb\nc\nd\n".to_vec(),
+            )
+            .await
+            .expect("upload source file");
+
+        let mut event = native_event("v1", "~/internal/gateway/middleware.go", 2);
+        service
+            .symbolicate_stored_event(project_id, &mut event)
+            .await;
+
+        let frame = &event["sentry"]["exception"]["values"][0]["stacktrace"]["frames"][0];
+        assert!(
+            frame.get("context_line").is_none(),
+            "source context must not be attached when the project opt-in is off"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_native_source_context_suffix_match() {
+        let test_db = setup_test_db().await;
+        let db = test_db.connection_arc();
+        let service = SourceMapService::new(db.clone());
+        let project_id = create_test_project(&db).await;
+
+        service
+            .upload_source_file(
+                project_id,
+                "v1",
+                "~/internal/gateway/middleware.go",
+                b"one\ntwo\nthree\nfour\n".to_vec(),
+            )
+            .await
+            .expect("upload source file");
+
+        // Frame carries only the bare basename — suffix match should find it.
+        let mut stack_trace = serde_json::json!({
+            "frames": [ { "filename": "middleware.go", "lineno": 3 } ]
+        });
+        service
+            .symbolicate_stack_trace(project_id, "v1", &mut stack_trace, true)
+            .await;
+
+        assert_eq!(
+            stack_trace["frames"][0]["context_line"].as_str(),
+            Some("three"),
+            "bare filename should resolve via suffix match"
+        );
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn test_upload_and_list_source_maps() {
