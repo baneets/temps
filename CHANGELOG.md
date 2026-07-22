@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.52] - 2026-07-22
+
+### Added
+
+- **containers:** Show metrics history in container detail ([#415](https://github.com/gotempsh/temps/issues/415))
+- **config:** Expose sandbox backend selection in settings API and UI ([#414](https://github.com/gotempsh/temps/issues/414))
+
+### Fixed
+
+- **web:** Override brace-expansion and js-yaml to patched versions ([#409](https://github.com/gotempsh/temps/issues/409))
+- **observability:** Prevent ClickHouse Array(Nothing) decode failures ([#408](https://github.com/gotempsh/temps/issues/408))
+- **clickhouse:** Align query result integer types ([#416](https://github.com/gotempsh/temps/issues/416))
+
 ## [0.1.0-beta.51] - 2026-07-21
 
 ### Added
