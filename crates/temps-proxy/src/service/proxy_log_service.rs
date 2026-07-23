@@ -356,6 +356,7 @@ impl ProxyLogService {
             || filters.operating_system.is_some()
             || filters.device_type.is_some()
             || filters.is_bot.is_some()
+            || filters.exclude_bots == Some(true)
             || filters.bot_name.is_some()
             || filters.ai_provider.is_some()
             || filters.ai_agent.is_some()
@@ -447,6 +448,15 @@ impl ProxyLogService {
         // Bot filters
         if let Some(is_bot) = filters.is_bot {
             query = query.filter(proxy_logs::Column::IsBot.eq(is_bot));
+        }
+        if filters.exclude_bots == Some(true) {
+            // Tri-state exclusion: drop detected bots but keep rows whose
+            // is_bot is NULL (older rows without detection metadata).
+            query = query.filter(
+                proxy_logs::Column::IsBot
+                    .eq(false)
+                    .or(proxy_logs::Column::IsBot.is_null()),
+            );
         }
         if let Some(bot_name) = filters.bot_name {
             query = query.filter(proxy_logs::Column::BotName.contains(&bot_name));
@@ -608,6 +618,7 @@ impl ProxyLogService {
             operating_system: None,
             device_type: None,
             is_bot: None,
+            exclude_bots: None,
             bot_name: None,
             ai_provider: None,
             ai_agent: None,

@@ -528,6 +528,7 @@ pub async fn query_traces(
             .map(parse_attributes)
             .filter(|m| !m.is_empty()),
         name_pattern: params.name_pattern.clone(),
+        root_only: false,
         // Sorting only applies to the trace-summaries list, not raw span queries.
         sort_by: TraceSortField::default(),
         sort_order: SortOrder::default(),
@@ -604,6 +605,7 @@ pub async fn query_trace_summaries(
             .map(parse_attributes)
             .filter(|m| !m.is_empty()),
         name_pattern: params.name_pattern.clone(),
+        root_only: false,
         sort_by: params
             .sort_by
             .as_deref()

@@ -27,6 +27,24 @@ pub enum ObservabilityError {
 
     #[error("Database error: {0}")]
     Database(#[from] sea_orm::DbErr),
+
+    /// The request-log storage backend (TimescaleDB or ClickHouse — selected
+    /// by `TEMPS_CLICKHOUSE_*`) failed while serving the Request kind.
+    #[error("Request log store error for project {project_id}: {source}")]
+    RequestStore {
+        project_id: i32,
+        #[source]
+        source: temps_proxy::service::proxy_log_service::ProxyLogServiceError,
+    },
+
+    /// The OTel span storage backend (TimescaleDB or ClickHouse) failed
+    /// while serving the Span kind.
+    #[error("Trace store error for project {project_id}: {source}")]
+    TraceStore {
+        project_id: i32,
+        #[source]
+        source: temps_otel::error::OtelError,
+    },
 }
 
 #[cfg(test)]

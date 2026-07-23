@@ -166,13 +166,26 @@ impl From<ObservabilityError> for Problem {
                     .with_title("Invalid Request")
                     .with_detail(error.to_string())
             }
-            ObservabilityError::Database(_) => {
+            ObservabilityError::Database(_)
+            | ObservabilityError::RequestStore { .. }
+            | ObservabilityError::TraceStore { .. } => {
                 problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
                     .with_title("Internal Server Error")
                     .with_detail(error.to_string())
             }
         }
     }
+}
+
+/// Query parameters for the `/full` endpoint.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct FullEventQuery {
+    /// The row's event timestamp as returned by the list endpoint. Optional,
+    /// but strongly recommended: it bounds the lookup to the storage
+    /// partitions/chunks around that instant instead of scanning the whole
+    /// retention window.
+    pub ts: Option<DateTime<Utc>>,
 }
 
 /// Fetch the un-truncated form of one event by `(kind, id)`. Side panel
@@ -186,7 +199,8 @@ impl From<ObservabilityError> for Problem {
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("kind" = EventKind, Path, description = "Event kind discriminator"),
-        ("event_id" = String, Path, description = "Per-kind primary key"),
+        ("event_id" = String, Path, description = "Per-kind identity: request_id for requests, `{trace_id}:{span_id}` for spans, serial id for errors/revenue"),
+        FullEventQuery,
     ),
     responses(
         (status = 200, description = "Full row", body = FullEvent),
@@ -201,13 +215,14 @@ pub async fn observability_full_event(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<ObservabilityState>>,
     Path((project_id, kind, event_id)): Path<(i32, EventKind, String)>,
+    Query(query): Query<FullEventQuery>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, LogsRead);
     project_access_guard!(auth, project_id, state.project_access_checker);
 
     let event = state
         .service
-        .fetch_full(project_id, kind, &event_id)
+        .fetch_full(project_id, kind, &event_id, query.ts)
         .await?;
     Ok((StatusCode::OK, Json(event)))
 }
@@ -248,6 +263,19 @@ mod tests {
                 to: "b".into(),
             },
             ObservabilityError::Database(sea_orm::DbErr::Custom("x".into())),
+            ObservabilityError::RequestStore {
+                project_id: 1,
+                source:
+                    temps_proxy::service::proxy_log_service::ProxyLogServiceError::DatabaseError(
+                        sea_orm::DbErr::Custom("x".into()),
+                    ),
+            },
+            ObservabilityError::TraceStore {
+                project_id: 1,
+                source: temps_otel::error::OtelError::Storage {
+                    message: "x".into(),
+                },
+            },
         ];
         for err in cases {
             // Ensure no panic — Problem construction succeeds for every variant.

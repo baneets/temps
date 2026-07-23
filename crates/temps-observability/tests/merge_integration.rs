@@ -17,6 +17,32 @@ use temps_observability::{
 };
 use uuid::Uuid;
 
+/// Build the merge service over the default TimescaleDB storage backends —
+/// the same wiring `configure_routes` produces on a server without
+/// `TEMPS_CLICKHOUSE_*`. (The ClickHouse path is covered by
+/// `clickhouse_observe_test.rs`.)
+fn build_service(db: &Arc<DatabaseConnection>) -> ObservabilityService {
+    let geo = Arc::new(temps_geo::GeoIpService::Mock(
+        temps_geo::MockGeoIpService::new(),
+    ));
+    let ip_service = Arc::new(temps_geo::IpAddressService::new(db.clone(), geo));
+    let storage = Arc::new(temps_proxy::storage::TimescaleDbProxyLogStore::new(
+        db.clone(),
+        ip_service.clone(),
+    ));
+    let proxy_logs = Arc::new(
+        temps_proxy::service::proxy_log_service::ProxyLogService::with_storage(
+            db.clone(),
+            ip_service,
+            storage,
+        ),
+    );
+    let otel: Arc<dyn temps_otel::storage::OtelStorage> = Arc::new(
+        temps_otel::storage::timescaledb::TimescaleDbStorage::new(db.clone(), None),
+    );
+    ObservabilityService::new(db.clone(), proxy_logs, otel)
+}
+
 async fn create_test_project(db: &Arc<DatabaseConnection>) -> i32 {
     use temps_entities::preset::Preset;
     let slug = format!("obs-{}", Uuid::new_v4());
@@ -117,7 +143,7 @@ async fn merge_returns_rows_in_descending_ts_across_kinds() {
     .await
     .expect("insert revenue event");
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
     let events = service
         .query(EventFilters {
             project_id,
@@ -181,7 +207,7 @@ async fn kinds_filter_excludes_unselected_tables() {
     .await
     .expect("insert error");
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
 
     let only_errors = service
         .query(EventFilters {
@@ -230,7 +256,7 @@ async fn time_range_filters_old_rows() {
         .expect("insert");
     }
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
     let recent = service
         .query(EventFilters {
             project_id,
@@ -260,7 +286,7 @@ async fn fetch_full_returns_untruncated_request() {
     let project_id = create_test_project(&db).await;
 
     let now = Utc::now();
-    let inserted = proxy_logs::ActiveModel {
+    proxy_logs::ActiveModel {
         timestamp: Set(now),
         method: Set("POST".into()),
         path: Set("/checkout".into()),
@@ -284,9 +310,11 @@ async fn fetch_full_returns_untruncated_request() {
     .await
     .expect("insert");
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
+    // Rows are identified by request_id (backend-agnostic), with the row's
+    // timestamp as a lookup-bounding hint.
     let full = service
-        .fetch_full(project_id, EventKind::Request, &inserted.id.to_string())
+        .fetch_full(project_id, EventKind::Request, "rid", Some(now))
         .await
         .expect("fetch full");
 
@@ -306,10 +334,10 @@ async fn fetch_full_404s_for_unknown_id() {
     let test_db = TestDatabase::with_migrations().await.expect("test db");
     let db = test_db.connection_arc();
     let project_id = create_test_project(&db).await;
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
 
     let err = service
-        .fetch_full(project_id, EventKind::Request, "999999")
+        .fetch_full(project_id, EventKind::Request, "999999", None)
         .await
         .unwrap_err();
     assert!(matches!(err, ObservabilityError::EventNotFound { .. }));
@@ -323,7 +351,7 @@ async fn fetch_full_404s_for_wrong_project() {
     let project_b = create_test_project(&db).await;
 
     let now = Utc::now();
-    let inserted = proxy_logs::ActiveModel {
+    proxy_logs::ActiveModel {
         timestamp: Set(now),
         method: Set("GET".into()),
         path: Set("/x".into()),
@@ -341,23 +369,26 @@ async fn fetch_full_404s_for_wrong_project() {
     .await
     .expect("insert");
 
-    let service = ObservabilityService::new(db.clone());
-    // Same id, but wrong project — must not leak across project boundaries.
+    let service = build_service(&db);
+    // Same request_id, but wrong project — must not leak across project
+    // boundaries even though the storage lookup itself is not project-scoped.
     let err = service
-        .fetch_full(project_b, EventKind::Request, &inserted.id.to_string())
+        .fetch_full(project_b, EventKind::Request, "r", Some(now))
         .await
         .unwrap_err();
     assert!(matches!(err, ObservabilityError::EventNotFound { .. }));
 }
 
 #[tokio::test]
-async fn fetch_full_rejects_malformed_id() {
+async fn fetch_full_404s_for_span_id_without_composite_separator() {
     let test_db = TestDatabase::with_migrations().await.expect("test db");
     let db = test_db.connection_arc();
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
 
+    // Span identities are `{trace_id}:{span_id}`; anything without the
+    // separator must 404 rather than error out.
     let err = service
-        .fetch_full(1, EventKind::Request, "not-an-int")
+        .fetch_full(1, EventKind::Span, "not-a-composite-id", None)
         .await
         .unwrap_err();
     assert!(matches!(err, ObservabilityError::EventNotFound { .. }));
@@ -398,7 +429,7 @@ async fn fetch_spans_returns_span_rows_from_otel_table() {
     .await
     .expect("insert otel_spans");
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
     let events = service
         .query(EventFilters {
             project_id,
@@ -513,7 +544,7 @@ async fn merge_interleaves_spans_with_other_kinds() {
     .await
     .expect("insert revenue");
 
-    let service = ObservabilityService::new(db.clone());
+    let service = build_service(&db);
     let events = service
         .query(EventFilters {
             project_id,

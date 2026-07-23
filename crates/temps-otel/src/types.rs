@@ -634,6 +634,13 @@ pub struct TraceQuery {
     pub attributes: Option<BTreeMap<String, String>>,
     /// Filter by span name pattern (ILIKE).
     pub name_pattern: Option<String>,
+    /// When `true`, only return ROOT spans (no parent) — one row per trace.
+    /// Roots are `parent_span_id IS NULL` on TimescaleDB and the `''`
+    /// sentinel on ClickHouse; each backend applies its own form. Used by
+    /// high-level activity feeds (unified Observe page) that would drown in
+    /// child spans otherwise.
+    #[serde(default)]
+    pub root_only: bool,
     /// Field to sort the trace-summaries list by. Defaults to start time.
     #[serde(default)]
     pub sort_by: TraceSortField,

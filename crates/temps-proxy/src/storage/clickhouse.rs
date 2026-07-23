@@ -801,6 +801,12 @@ impl ClickHouseProxyLogStore {
             clauses.push("is_bot = ?".into());
             binds.push(Bv::Bool(is_bot));
         }
+        if filters.exclude_bots == Some(true) {
+            // Tri-state exclusion: drop detected bots but KEEP rows with no
+            // detection metadata (is_bot IS NULL) — mirrors the TimescaleDB
+            // `is_bot = false OR is_bot IS NULL` predicate.
+            clauses.push("(is_bot = 0 OR is_bot IS NULL)".into());
+        }
         if let Some(ref bot_name) = filters.bot_name {
             clauses.push("bot_name ILIKE ?".into());
             binds.push(Bv::Str(format!("%{}%", escape_like_pattern(bot_name))));
@@ -2125,6 +2131,7 @@ mod tests {
             operating_system: None,
             device_type: None,
             is_bot: Some(true),
+            exclude_bots: None,
             bot_name: None,
             ai_provider: None,
             ai_agent: None,
@@ -2172,6 +2179,28 @@ mod tests {
         );
     }
 
+    /// exclude_bots=true is the NULL-keeping bot exclusion used by the
+    /// Observe feed's hide-bots toggle: detected bots drop, rows without
+    /// detection metadata (is_bot IS NULL) stay.
+    #[test]
+    fn build_list_where_exclude_bots_keeps_null_rows() {
+        let mut filters = empty_query();
+        filters.exclude_bots = Some(true);
+        let (clauses, binds, impossible) =
+            ClickHouseProxyLogStore::build_list_where(None, None, &filters);
+        assert!(!impossible);
+        assert!(clauses
+            .iter()
+            .any(|c| c == "(is_bot = 0 OR is_bot IS NULL)"));
+        assert!(binds.is_empty(), "predicate is constant — no binds");
+
+        // exclude_bots=false must be a no-op, not `is_bot = false`.
+        let mut noop = empty_query();
+        noop.exclude_bots = Some(false);
+        let (clauses, _, _) = ClickHouseProxyLogStore::build_list_where(None, None, &noop);
+        assert!(clauses.is_empty());
+    }
+
     /// Unknown ai_provider must mark the query impossible (Postgres Id.eq(-1)).
     #[test]
     fn build_list_where_unknown_provider_is_impossible() {
@@ -2194,46 +2223,7 @@ mod tests {
     }
 
     fn empty_query() -> ProxyLogsQuery {
-        ProxyLogsQuery {
-            project_id: None,
-            environment_id: None,
-            deployment_id: None,
-            session_id: None,
-            visitor_id: None,
-            start_date: None,
-            end_date: None,
-            method: None,
-            host: None,
-            path: None,
-            client_ip: None,
-            status_code: None,
-            response_time_min: None,
-            response_time_max: None,
-            routing_status: None,
-            request_source: None,
-            is_system_request: None,
-            user_agent: None,
-            browser: None,
-            operating_system: None,
-            device_type: None,
-            is_bot: None,
-            bot_name: None,
-            ai_provider: None,
-            ai_agent: None,
-            is_ai_agent: None,
-            request_size_min: None,
-            request_size_max: None,
-            response_size_min: None,
-            response_size_max: None,
-            cache_status: None,
-            container_id: None,
-            upstream_host: None,
-            has_error: None,
-            page: None,
-            page_size: None,
-            sort_by: None,
-            sort_order: None,
-        }
+        ProxyLogsQuery::default()
     }
 
     #[tokio::test]

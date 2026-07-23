@@ -6855,7 +6855,11 @@ export type FullRequest = {
     environment_id?: number | null;
     error_group_id?: number | null;
     host: string;
-    id: number;
+    /**
+     * The request's unique `request_id` — same identity the list rows carry
+     * (backend-agnostic; ClickHouse rows have no serial PK).
+     */
+    id: string;
     latency_ms?: number | null;
     method: string;
     path: string;
@@ -12607,7 +12611,13 @@ export type RequestRow = {
     error_group_id?: number | null;
     headers_truncated: boolean;
     host: string;
-    id: number;
+    /**
+     * The request's unique `request_id` (assigned by the proxy). Used as the
+     * row identity instead of the storage PK because the ClickHouse backend
+     * has no serial id (rows come back with `id = 0`) while `request_id` is
+     * unique and present on both backends.
+     */
+    id: string;
     latency_ms?: number | null;
     method: string;
     path: string;
@@ -40551,11 +40561,19 @@ export type ObservabilityFullEventData = {
          */
         kind: EventKind;
         /**
-         * Per-kind primary key
+         * Per-kind identity: request_id for requests, `{trace_id}:{span_id}` for spans, serial id for errors/revenue
          */
         event_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * The row's event timestamp as returned by the list endpoint. Optional,
+         * but strongly recommended: it bounds the lookup to the storage
+         * partitions/chunks around that instant instead of scanning the whole
+         * retention window.
+         */
+        ts?: string;
+    };
     url: '/projects/{project_id}/observe/events/{kind}/{event_id}/full';
 };
 
@@ -42489,6 +42507,13 @@ export type GetProxyLogsData = {
          * Filter by bot detection
          */
         is_bot?: boolean | null;
+        /**
+         * When `true`, exclude rows flagged as bots while KEEPING rows whose
+         * `is_bot` is NULL (older rows without detection metadata). This is the
+         * tri-state complement of `is_bot=false`, which matches only rows
+         * explicitly detected as non-bots. `false`/omitted is a no-op.
+         */
+        exclude_bots?: boolean | null;
         /**
          * Filter by bot name
          */

@@ -1427,6 +1427,11 @@ impl OtelStorage for TimescaleDbStorage {
             values.push(format!("%{}%", escape_like_pattern(pattern)).into());
             param_idx += 1;
         }
+        if query.root_only {
+            // Root spans are stored with a NULL parent (see otel decode);
+            // backed by the partial index idx_otel_spans_root_project_start.
+            where_clauses.push("parent_span_id IS NULL".to_string());
+        }
 
         let where_sql = where_clauses.join(" AND ");
 
@@ -3630,6 +3635,7 @@ mod tests {
             deployment_id: None,
             attributes: None,
             name_pattern: None,
+            root_only: false,
             sort_by: TraceSortField::StartTime,
             sort_order: Default::default(),
             limit: None,

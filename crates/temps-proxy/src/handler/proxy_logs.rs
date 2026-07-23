@@ -44,7 +44,7 @@ impl From<ProxyLogServiceError> for Problem {
 }
 
 /// Query parameters for listing proxy logs
-#[derive(Debug, Deserialize, IntoParams)]
+#[derive(Debug, Default, Deserialize, IntoParams)]
 pub struct ProxyLogsQuery {
     /// Filter by project ID
     pub project_id: Option<i32>,
@@ -102,6 +102,11 @@ pub struct ProxyLogsQuery {
     // Bot detection filters
     /// Filter by bot detection
     pub is_bot: Option<bool>,
+    /// When `true`, exclude rows flagged as bots while KEEPING rows whose
+    /// `is_bot` is NULL (older rows without detection metadata). This is the
+    /// tri-state complement of `is_bot=false`, which matches only rows
+    /// explicitly detected as non-bots. `false`/omitted is a no-op.
+    pub exclude_bots: Option<bool>,
     /// Filter by bot name
     pub bot_name: Option<String>,
     /// Filter by AI provider (e.g. `OpenAI`, `Anthropic`, `Perplexity`). Matches

@@ -1087,6 +1087,12 @@ impl OtelStorage for ClickHouseOtelStorage {
             sql.push_str(" AND name ILIKE ?");
             binds.push(Bv::Str(format!("%{}%", escape_like_pattern(pattern))));
         }
+        if query.root_only {
+            // Root spans use the '' sentinel for parent_span_id in the CH
+            // schema (0001_spans.sql) — the NULL analog of TimescaleDB's
+            // `parent_span_id IS NULL`.
+            sql.push_str(" AND parent_span_id = ''");
+        }
 
         // ORDER BY — enum-derived, injection-safe.
         let order_dir = query.sort_order.as_sql();
