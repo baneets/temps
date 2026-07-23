@@ -284,9 +284,12 @@ impl ObservabilityService {
             },
             ..Default::default()
         };
-        let (rows, _total) = self
+        // list_page (not list_with_filters): the feed renders a page and no
+        // total, so the pagination COUNT — exact on the hypertable, FINAL
+        // merge-on-read on ClickHouse — would be wasted work on every poll.
+        let rows = self
             .proxy_logs
-            .list_with_filters(filters.from, filters.to, query, 1, filters.limit)
+            .list_page(filters.from, filters.to, query, filters.limit)
             .await
             .map_err(|source| ObservabilityError::RequestStore {
                 project_id: filters.project_id,
@@ -377,6 +380,12 @@ impl ObservabilityService {
             project_id: filters.project_id,
             start_time: filters.from,
             end_time: filters.to,
+            // environment_id is intentionally NOT passed: the pre-storage
+            // implementation never filtered spans by environment (otel_spans
+            // has no env column; TimescaleDB resolves it via a deployments
+            // join and ClickHouse can't resolve it at all), so passing it
+            // would make the two backends disagree. Deployment scoping covers
+            // the common case.
             deployment_id: filters.deployment_id,
             name_pattern: filters.search.clone(),
             // Roots only by default (one row per trace); a name search widens

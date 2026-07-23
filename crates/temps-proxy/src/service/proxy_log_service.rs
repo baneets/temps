@@ -311,20 +311,17 @@ impl ProxyLogService {
     }
 
     /// Get proxy logs with filters and pagination
-    pub async fn list_with_filters(
-        &self,
+    /// Build the filtered + sorted Sea-ORM select for the proxy-log list.
+    ///
+    /// Returns the query plus whether any narrowing predicate was applied
+    /// (drives the planner-stats approximate-count fast path in
+    /// [`Self::list_with_filters`]). Shared by the counted pagination path and
+    /// the count-free [`Self::list_page`] feed path so the two can never drift.
+    fn build_list_query(
         start_date: Option<UtcDateTime>,
         end_date: Option<UtcDateTime>,
         filters: crate::handler::proxy_logs::ProxyLogsQuery,
-        page: u64,
-        page_size: u64,
-    ) -> Result<(Vec<proxy_logs::Model>, u64), ProxyLogServiceError> {
-        if let Some(storage) = &self.storage {
-            return storage
-                .list_with_filters(start_date, end_date, filters, page, page_size)
-                .await;
-        }
-
+    ) -> (sea_orm::Select<proxy_logs::Entity>, bool) {
         let mut query = proxy_logs::Entity::find();
 
         // Whether any narrowing predicate is set. When nothing is filtered,
@@ -570,6 +567,25 @@ impl ProxyLogService {
             _ => query.order_by_desc(sort_col),
         };
 
+        (query, has_filters)
+    }
+
+    pub async fn list_with_filters(
+        &self,
+        start_date: Option<UtcDateTime>,
+        end_date: Option<UtcDateTime>,
+        filters: crate::handler::proxy_logs::ProxyLogsQuery,
+        page: u64,
+        page_size: u64,
+    ) -> Result<(Vec<proxy_logs::Model>, u64), ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .list_with_filters(start_date, end_date, filters, page, page_size)
+                .await;
+        }
+
+        let (query, has_filters) = Self::build_list_query(start_date, end_date, filters);
+
         let paginator = query.paginate(self.db.as_ref(), page_size);
         let (total, _) = temps_database::count_for_pagination(
             self.db.as_ref(),
@@ -581,6 +597,30 @@ impl ProxyLogService {
         let items = paginator.fetch_page(page - 1).await?;
 
         Ok((items, total))
+    }
+
+    /// Newest-first page of proxy logs WITHOUT the pagination total.
+    ///
+    /// [`Self::list_with_filters`] always computes the total (an exact
+    /// `COUNT(*)` over the filtered hypertable range when any predicate
+    /// narrows the set; a merge-on-read `count() FINAL` on ClickHouse).
+    /// Feed-style callers — the unified Observe stream — render a page and
+    /// discard the total, so this path skips the aggregate entirely and does
+    /// a single LIMIT'd, index-friendly select.
+    pub async fn list_page(
+        &self,
+        start_date: Option<UtcDateTime>,
+        end_date: Option<UtcDateTime>,
+        filters: crate::handler::proxy_logs::ProxyLogsQuery,
+        limit: u64,
+    ) -> Result<Vec<proxy_logs::Model>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .list_page(start_date, end_date, filters, limit)
+                .await;
+        }
+        let (query, _has_filters) = Self::build_list_query(start_date, end_date, filters);
+        Ok(query.limit(limit).all(self.db.as_ref()).await?)
     }
 
     /// Legacy method - kept for backward compatibility

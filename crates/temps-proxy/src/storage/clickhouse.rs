@@ -1030,6 +1030,64 @@ impl ProxyLogStorage for ClickHouseProxyLogStore {
         Ok((models, total))
     }
 
+    async fn list_page(
+        &self,
+        start_date: Option<UtcDateTime>,
+        end_date: Option<UtcDateTime>,
+        filters: ProxyLogsQuery,
+        limit: u64,
+    ) -> Result<Vec<proxy_logs::Model>, ProxyLogServiceError> {
+        let (clauses, binds, impossible) = Self::build_list_where(start_date, end_date, &filters);
+
+        // Unknown ai_provider → guaranteed empty, no round-trip.
+        if impossible {
+            return Ok(vec![]);
+        }
+
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        };
+
+        // Same page projection as `list_with_filters`, minus the count()
+        // aggregate — feed callers discard the total. ORDER BY column is
+        // allowlist-derived; direction is a fixed enum (injection-safe).
+        let order_col = sort_column(filters.sort_by.as_deref());
+        let order_dir = match filters.sort_order.as_deref() {
+            Some("asc") => "ASC",
+            _ => "DESC",
+        };
+        let select_sql = format!(
+            "SELECT \
+                toUnixTimestamp64Milli(timestamp) AS timestamp_ms, method, path, query_string, \
+                host, status_code, response_time_ms, request_source, is_system_request, \
+                routing_status, project_id, environment_id, deployment_id, session_id, visitor_id, \
+                container_id, upstream_host, error_message, client_ip, user_agent, referrer, \
+                request_id, ip_geolocation_id, browser, browser_version, operating_system, \
+                device_type, is_bot, bot_name, request_size_bytes, response_size_bytes, cache_status \
+             FROM proxy_logs FINAL \
+             {where_clause} \
+             ORDER BY {order_col} {order_dir} \
+             LIMIT ?"
+        );
+
+        let mut binds = binds;
+        binds.push(Bv::I64(limit as i64));
+        let q = apply_binds(self.client.query(&select_sql), binds);
+        let rows = q.fetch_all::<ChProxyLogReadRow>().await.map_err(|e| {
+            ProxyLogServiceError::ClickHouse {
+                operation: "list_page".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        Ok(rows
+            .into_iter()
+            .map(ChProxyLogReadRow::into_model)
+            .collect())
+    }
+
     async fn get_by_id(
         &self,
         id: i32,

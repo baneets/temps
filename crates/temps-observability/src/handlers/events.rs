@@ -166,12 +166,20 @@ impl From<ObservabilityError> for Problem {
                     .with_title("Invalid Request")
                     .with_detail(error.to_string())
             }
-            ObservabilityError::Database(_)
-            | ObservabilityError::RequestStore { .. }
-            | ObservabilityError::TraceStore { .. } => {
+            ObservabilityError::Database(_) => {
                 problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
                     .with_title("Internal Server Error")
                     .with_detail(error.to_string())
+            }
+            ObservabilityError::RequestStore { .. } | ObservabilityError::TraceStore { .. } => {
+                // Storage-backend errors can embed infrastructure details
+                // (ClickHouse host/port, SQL error text). Log the full chain
+                // server-side; the client only needs to know the upstream
+                // store failed.
+                tracing::error!(error = %error, "observability storage backend error");
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail("Telemetry storage backend error; see server logs")
             }
         }
     }
