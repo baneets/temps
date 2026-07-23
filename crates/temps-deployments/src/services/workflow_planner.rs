@@ -1644,7 +1644,10 @@ impl WorkflowPlanner {
                     "project_id": project.id,
                     "release": release,
                     "download_job_id": "download_repo",
-                    "project_directory": project.directory,
+                    "build_job_id": "build_image",
+                    // None = default to the Docker build context; a set value
+                    // (or .temps.yaml sourceContext.root) overrides it.
+                    "error_source_root": project.error_source_root,
                     "extensions": [
                         "go", "rs", "py", "rb", "js", "jsx", "ts", "tsx", "java", "kt",
                         "c", "h", "cpp", "cc", "hpp", "cs", "php", "swift", "scala", "ex", "exs",

@@ -617,6 +617,7 @@ pub async fn update_project_settings(
             settings.ai_write_actions_enabled,
             settings.cross_project_trace_sharing,
             settings.error_source_context_enabled,
+            settings.error_source_root.clone(),
         )
         .await
         .map_err(Problem::from)?;

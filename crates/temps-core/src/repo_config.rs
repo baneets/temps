@@ -32,6 +32,26 @@ pub struct TempsConfig {
     /// Workflow configurations (alternative to .temps/workflows/*.yaml files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflows: Option<Vec<WorkflowYamlConfig>>,
+
+    /// Error-tracking source-context capture configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<SourceContextConfig>,
+}
+
+/// `.temps.yaml` `sourceContext` block — controls which source the
+/// error-tracking auto-capture job uploads. All fields optional; when absent
+/// the job defaults to the deployment's Docker build context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceContextConfig {
+    /// Directory to capture source from, relative to the repository root.
+    /// Overrides the default (the Docker build context).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+
+    /// File extensions to include (without the dot). Overrides the built-in
+    /// source-code extension set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
 }
 
 /// Cron job configuration
@@ -710,6 +730,7 @@ build:
             health: None,
             agents: None,
             workflows: None,
+            source_context: None,
         };
 
         let yaml = config.to_yaml().unwrap();

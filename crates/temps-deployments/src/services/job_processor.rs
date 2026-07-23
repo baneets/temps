@@ -2077,6 +2077,7 @@ mod tests {
             main_branch: Set("main".to_string()),
             // Preview envs disabled — the legacy "named preview" fallback path.
             error_source_context_enabled: Set(false),
+            error_source_root: Set(None),
             enable_preview_environments: Set(false),
             ..Default::default()
         };

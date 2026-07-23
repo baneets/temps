@@ -1292,11 +1292,17 @@ impl WorkflowExecutionService {
                     .unwrap_or("download_repo")
                     .to_string();
 
-                let project_directory = config
-                    .get("project_directory")
+                let build_job_id = config
+                    .get("build_job_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(".")
+                    .unwrap_or("build_image")
                     .to_string();
+
+                // None (or null) = default to the Docker build context.
+                let error_source_root = config
+                    .get("error_source_root")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
                 let extensions: Vec<String> = config
                     .get("extensions")
@@ -1318,7 +1324,8 @@ impl WorkflowExecutionService {
                     project_id,
                     release,
                     download_job_id,
-                    project_directory,
+                    build_job_id,
+                    error_source_root,
                     extensions,
                     source_map_service,
                 )

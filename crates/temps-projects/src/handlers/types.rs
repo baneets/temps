@@ -293,6 +293,9 @@ pub struct ProjectResponse {
     /// Opt-in to native error-tracking source context (false = off). When on,
     /// Temps stores uploaded source files and shows source code in stack traces.
     pub error_source_context_enabled: bool,
+    /// Where auto-capture reads source from (relative to the checkout). Null =
+    /// the deployment's Docker build context.
+    pub error_source_root: Option<String>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, newly-created preview environments default to on-demand mode
@@ -346,6 +349,7 @@ impl ProjectResponse {
             ai_debug_chat_enabled: project.ai_debug_chat_enabled,
             ai_write_actions_enabled: project.ai_write_actions_enabled,
             error_source_context_enabled: project.error_source_context_enabled,
+            error_source_root: project.error_source_root,
             enable_preview_environments: project.enable_preview_environments,
             preview_envs_on_demand: project.preview_envs_on_demand,
             preview_envs_idle_timeout_seconds: project.preview_envs_idle_timeout_seconds,
@@ -571,6 +575,10 @@ pub struct UpdateProjectSettingsRequest {
     /// Opt in to native error-tracking source context (source-file upload +
     /// source code shown in stack traces).
     pub error_source_context_enabled: Option<bool>,
+    /// Set the auto-capture source root (relative to the checkout). Send an
+    /// empty string to clear it back to the build-context default. Omit to
+    /// leave unchanged.
+    pub error_source_root: Option<String>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: Option<bool>,
     /// When true, newly-created preview environments default to on-demand mode.
