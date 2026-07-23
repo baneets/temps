@@ -877,6 +877,7 @@ impl ProjectService {
         ai_debug_chat_enabled: Option<bool>,
         ai_write_actions_enabled: Option<bool>,
         cross_project_trace_sharing: Option<bool>,
+        error_source_context_enabled: Option<bool>,
     ) -> Result<Project, ProjectError> {
         // Validate preview env on-demand timeouts before touching the DB.
         // Mirrors DeploymentConfig::validate so the project-level defaults are
@@ -1012,6 +1013,7 @@ impl ProjectService {
         if ai_alert_summaries_enabled.is_some()
             || ai_debug_chat_enabled.is_some()
             || ai_write_actions_enabled.is_some()
+            || error_source_context_enabled.is_some()
         {
             let project = projects::Entity::find_by_id(project_id)
                 .one(self.db.as_ref())
@@ -1029,6 +1031,10 @@ impl ProjectService {
             }
             if let Some(v) = ai_write_actions_enabled {
                 active_project.ai_write_actions_enabled = Set(v);
+            }
+            // Opt-in for native error-tracking source context (non-null bool).
+            if let Some(v) = error_source_context_enabled {
+                active_project.error_source_context_enabled = Set(v);
             }
             active_project.update(self.db.as_ref()).await?;
         }
@@ -2505,6 +2511,7 @@ impl ProjectService {
             ai_alert_summaries_enabled: db_project.ai_alert_summaries_enabled,
             ai_debug_chat_enabled: db_project.ai_debug_chat_enabled,
             ai_write_actions_enabled: db_project.ai_write_actions_enabled,
+            error_source_context_enabled: db_project.error_source_context_enabled,
             enable_preview_environments: db_project.enable_preview_environments,
             preview_envs_on_demand: db_project.preview_envs_on_demand,
             preview_envs_idle_timeout_seconds: db_project.preview_envs_idle_timeout_seconds,
@@ -3050,6 +3057,7 @@ mod tests {
                 None,
                 None,
                 None, // cross_project_trace_sharing
+                None, // error_source_context_enabled
             )
             .await;
 

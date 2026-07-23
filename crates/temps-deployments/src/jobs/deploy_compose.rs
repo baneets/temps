@@ -534,7 +534,7 @@ fn validate_relative_path(path: &str, field: &str) -> Result<(), WorkflowError> 
 /// supplied base directory. This is the filesystem half of
 /// `validate_relative_path`: Git preserves symlinks, so lexical confinement is
 /// not sufficient by itself.
-fn canonicalize_confined_repo_path(
+pub(crate) fn canonicalize_confined_repo_path(
     base_dir: &Path,
     relative_path: &Path,
     field: &str,

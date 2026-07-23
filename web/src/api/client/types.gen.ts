@@ -11570,6 +11570,11 @@ export type ProjectResponse = {
      * Enable automatic preview environment creation for each branch
      */
     enable_preview_environments: boolean;
+    /**
+     * Opt-in to native error-tracking source context (false = off). When on,
+     * Temps stores uploaded source files and shows source code in stack traces.
+     */
+    error_source_context_enabled: boolean;
     git_provider_connection_id?: number | null;
     /**
      * Git clone URL for the repository (used for public repos without a provider connection)
@@ -14917,6 +14922,21 @@ export type SourceBody = {
     url: string;
 };
 
+export type SourceFileListResponse = {
+    source_files: Array<SourceFileResponse>;
+    total: number;
+};
+
+export type SourceFileResponse = {
+    checksum?: string | null;
+    created_at: string;
+    file_path: string;
+    id: number;
+    project_id: number;
+    release: string;
+    size_bytes: number;
+};
+
 export type SourceMapListResponse = {
     source_maps: Array<SourceMapResponse>;
     total: number;
@@ -16584,6 +16604,11 @@ export type UpdateProjectSettingsRequest = {
      * Enable automatic preview environment creation for each branch
      */
     enable_preview_environments?: boolean | null;
+    /**
+     * Opt in to native error-tracking source context (source-file upload +
+     * source code shown in stack traces).
+     */
+    error_source_context_enabled?: boolean | null;
     git_provider_connection_id?: number | null;
     main_branch?: string | null;
     preset?: string | null;
@@ -40563,6 +40588,126 @@ export type ObservabilityFullEventResponses = {
 };
 
 export type ObservabilityFullEventResponse = ObservabilityFullEventResponses[keyof ObservabilityFullEventResponses];
+
+export type DeleteReleaseSourceFilesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-files';
+};
+
+export type DeleteReleaseSourceFilesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type DeleteReleaseSourceFilesResponses = {
+    /**
+     * Source files deleted
+     */
+    200: DeleteResponse;
+};
+
+export type DeleteReleaseSourceFilesResponse = DeleteReleaseSourceFilesResponses[keyof DeleteReleaseSourceFilesResponses];
+
+export type ListSourceFilesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-files';
+};
+
+export type ListSourceFilesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type ListSourceFilesResponses = {
+    /**
+     * List of source files
+     */
+    200: SourceFileListResponse;
+};
+
+export type ListSourceFilesResponse = ListSourceFilesResponses[keyof ListSourceFilesResponses];
+
+export type UploadSourceFileData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-files';
+};
+
+export type UploadSourceFileErrors = {
+    /**
+     * Missing fields
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Source context disabled for project
+     */
+    409: unknown;
+    /**
+     * Source file too large
+     */
+    413: unknown;
+};
+
+export type UploadSourceFileResponses = {
+    /**
+     * Source file uploaded
+     */
+    201: SourceFileResponse;
+};
+
+export type UploadSourceFileResponse = UploadSourceFileResponses[keyof UploadSourceFileResponses];
 
 export type DeleteReleaseSourceMapsData = {
     body?: never;

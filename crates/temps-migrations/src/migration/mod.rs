@@ -158,6 +158,8 @@ mod m20260717_000001_drop_magic_link_tokens;
 mod m20260720_000001_add_backend_to_sandboxes;
 mod m20260720_000001_audit_logs_keep_history_on_user_delete;
 mod m20260720_000002_create_sandbox_events;
+mod m20260722_000001_create_source_files;
+mod m20260722_000002_add_source_context_enabled_to_projects;
 
 pub struct Migrator;
 
@@ -321,6 +323,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260720_000001_add_backend_to_sandboxes::Migration),
             Box::new(m20260720_000002_create_sandbox_events::Migration),
             Box::new(m20260720_000001_audit_logs_keep_history_on_user_delete::Migration),
+            Box::new(m20260722_000001_create_source_files::Migration),
+            Box::new(m20260722_000002_add_source_context_enabled_to_projects::Migration),
         ]
     }
 }

@@ -1621,6 +1621,43 @@ impl WorkflowPlanner {
             );
         }
 
+        // Job 9: Capture source files (native symbolication — Go/Rust/etc.).
+        // Uploads raw source from the git checkout so native stack frames show
+        // source code. Opt-in per project, so it is only scheduled when the
+        // project has enabled source context (no overhead for anyone else).
+        if has_git_info && project.error_source_context_enabled {
+            let release = deployment
+                .commit_sha
+                .clone()
+                .unwrap_or_else(|| format!("deploy-{}", deployment.id));
+
+            jobs.push(JobDefinition {
+                job_id: "capture_source_files".to_string(),
+                job_type: "CaptureSourceFilesJob".to_string(),
+                name: "Capture Source Files".to_string(),
+                description: Some(
+                    "Upload application source from the checkout for native error symbolication"
+                        .to_string(),
+                ),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "project_id": project.id,
+                    "release": release,
+                    "download_job_id": "download_repo",
+                    "project_directory": project.directory,
+                    "extensions": [
+                        "go", "rs", "py", "rb", "js", "jsx", "ts", "tsx", "java", "kt",
+                        "c", "h", "cpp", "cc", "hpp", "cs", "php", "swift", "scala", "ex", "exs",
+                    ],
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added capture_source_files job to workflow (release: {})",
+                release
+            );
+        }
+
         info!(
             "Planned {} jobs for Git-based project {}",
             jobs.len(),
@@ -1850,12 +1887,38 @@ impl WorkflowPlanner {
             .resolve_exposed_port(environment, project, Some(&external_image_ref))
             .await;
 
+        // Release identity for image deploys. Unlike git builds (which have a
+        // commit SHA), an image deploy is pinned to an image tag/digest — that
+        // IS the deployed artifact's identity. Inject it as SENTRY_RELEASE /
+        // OTEL_SERVICE_VERSION so error events and traces are attributable to
+        // the exact image, and so it can be used as the join key for source-map
+        // / source-file uploads. Prefer an explicit commit SHA when present,
+        // then the image tag, falling back to the full ref (e.g. a digest).
+        // `or_insert` so a user-provided value always wins.
+        let release_id = deployment
+            .commit_sha
+            .clone()
+            .or_else(|| image_ref_release(&external_image_ref))
+            .unwrap_or_else(|| external_image_ref.clone());
+
         let mut deploy_env_vars = env_vars.clone();
         deploy_env_vars.insert("PORT".to_string(), exposed_port.to_string());
+        deploy_env_vars
+            .entry("SENTRY_RELEASE".to_string())
+            .or_insert_with(|| release_id.clone());
+        deploy_env_vars
+            .entry("OTEL_SERVICE_VERSION".to_string())
+            .or_insert_with(|| release_id.clone());
 
         let remote_deploy_env_vars = remote_env_vars.as_ref().map(|rv| {
             let mut remote = rv.clone();
             remote.insert("PORT".to_string(), exposed_port.to_string());
+            remote
+                .entry("SENTRY_RELEASE".to_string())
+                .or_insert_with(|| release_id.clone());
+            remote
+                .entry("OTEL_SERVICE_VERSION".to_string())
+                .or_insert_with(|| release_id.clone());
             remote
         });
 
@@ -2103,6 +2166,35 @@ pub(crate) fn public_sentry_dsn_var(
     }
 }
 
+/// Extract a release identifier (tag or digest) from a container image
+/// reference. This is the deployed artifact's identity for image deploys —
+/// used as SENTRY_RELEASE / OTEL_SERVICE_VERSION.
+///
+/// Handles the registry-port ambiguity: the tag separator is the LAST `:` and
+/// only counts if it comes after the last `/` (so `registry:5000/app` has no
+/// tag, but `registry:5000/app:v1` → `v1`). A `@sha256:...` digest is returned
+/// whole. Returns `None` when the ref carries no explicit tag or digest.
+fn image_ref_release(image_ref: &str) -> Option<String> {
+    // Digest form: name@sha256:abcdef... — the digest is the identity.
+    if let Some((_, digest)) = image_ref.split_once('@') {
+        if !digest.is_empty() {
+            return Some(digest.to_string());
+        }
+    }
+
+    // Tag form: the tag is after the last ':', but only if that ':' is in the
+    // final path segment (otherwise it's a registry host:port).
+    let last_segment_start = image_ref.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let last_segment = &image_ref[last_segment_start..];
+    if let Some((_, tag)) = last_segment.rsplit_once(':') {
+        if !tag.is_empty() {
+            return Some(tag.to_string());
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2113,6 +2205,31 @@ mod tests {
     use temps_core::EncryptionService;
     use temps_database::test_utils::TestDatabase;
     use temps_entities::{preset::Preset, upstream_config::UpstreamList};
+
+    #[test]
+    fn image_ref_release_extracts_tag_digest_and_handles_registry_port() {
+        // Simple tag.
+        assert_eq!(
+            image_ref_release("registry.gitlab.com/group/app:prod-7c3a1ac9"),
+            Some("prod-7c3a1ac9".to_string())
+        );
+        // Registry with a port must NOT be mistaken for a tag.
+        assert_eq!(image_ref_release("localhost:5000/app"), None);
+        // Registry port AND a tag.
+        assert_eq!(
+            image_ref_release("localhost:5000/app:v1.2.3"),
+            Some("v1.2.3".to_string())
+        );
+        // Digest form wins and is returned whole.
+        assert_eq!(
+            image_ref_release("registry.io/app@sha256:abc123"),
+            Some("sha256:abc123".to_string())
+        );
+        // No tag / no digest.
+        assert_eq!(image_ref_release("registry.io/app"), None);
+        // Bare name with tag.
+        assert_eq!(image_ref_release("app:latest"), Some("latest".to_string()));
+    }
 
     fn create_test_config_service(db: Arc<DatabaseConnection>) -> Arc<ConfigService> {
         let server_config = Arc::new(

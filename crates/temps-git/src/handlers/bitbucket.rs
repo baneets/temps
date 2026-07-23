@@ -421,6 +421,7 @@ mod tests {
             ai_debug_chat_enabled: None,
             ai_write_actions_enabled: false,
             cross_project_trace_sharing: true,
+            error_source_context_enabled: false,
             enable_preview_environments: false,
             preview_envs_on_demand: false,
             preview_envs_idle_timeout_seconds: 300,

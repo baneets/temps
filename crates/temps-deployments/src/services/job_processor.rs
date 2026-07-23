@@ -2076,6 +2076,7 @@ mod tests {
             is_public_repo: Set(false),
             main_branch: Set("main".to_string()),
             // Preview envs disabled — the legacy "named preview" fallback path.
+            error_source_context_enabled: Set(false),
             enable_preview_environments: Set(false),
             ..Default::default()
         };

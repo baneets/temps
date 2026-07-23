@@ -278,6 +278,25 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
     refetch()
   }
 
+  const handleToggleErrorSourceContext = async (enabled: boolean) => {
+    if (!project?.id) return
+
+    await toast.promise(
+      updateProjectSettings.mutateAsync({
+        path: { project_id: project.id! },
+        body: {
+          error_source_context_enabled: enabled,
+        },
+      }),
+      {
+        loading: 'Updating source context setting...',
+        success: 'Error tracking source context updated',
+        error: 'Failed to update source context setting',
+      }
+    )
+    refetch()
+  }
+
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const deleteProjectMutationM = useMutation({
@@ -737,6 +756,37 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
             <Switch
               checked={project?.cross_project_trace_sharing ?? true}
               onCheckedChange={handleToggleCrossProjectTraceSharing}
+              disabled={updateProjectSettings.isPending}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Error Tracking Source Context Card */}
+      <Card className="bg-background text-foreground">
+        <CardHeader>
+          <CardTitle>Error Tracking Source Context</CardTitle>
+          <CardDescription>
+            Show the actual source code around each stack frame in error
+            reports. JavaScript source maps always resolve; enable this to also
+            store uploaded source files and render code for native stack traces
+            (Go, Rust, Python, and more).
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-row items-center justify-between rounded-lg border p-4">
+            <div className="space-y-0.5 pr-4">
+              <Label className="text-base">Source code in stack traces</Label>
+              <p className="text-sm text-muted-foreground">
+                Off by default. When enabled, upload your application source per
+                release (via the CLI or API, keyed by the deployed commit/tag)
+                and Temps shows the code around each frame. Source files are
+                only accepted and stored while this is on.
+              </p>
+            </div>
+            <Switch
+              checked={project?.error_source_context_enabled ?? false}
+              onCheckedChange={handleToggleErrorSourceContext}
               disabled={updateProjectSettings.isPending}
             />
           </div>
