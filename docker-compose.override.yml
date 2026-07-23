@@ -1,0 +1,28 @@
+# docker-compose.override.yml — Luria's config layer over upstream's compose.
+#
+# `docker compose` auto-merges this on top of docker-compose.yml. ALL Luria-
+# specific config lives here so:
+#   - upstream's docker-compose.yml stays untouched → `git merge upstream` is
+#     conflict-free (same principle as CHANGES-FROM-UPSTREAM.md), and
+#   - a new VPS inherits identical config just by cloning the repo.
+#
+# This is the portability seam: swap the box, not the config.
+services:
+  temps:
+    environment:
+      # Kill the anonymous phone-home to telemetry.temps.sh (audit §1 in
+      # CHANGES-FROM-UPSTREAM.md). Belt-and-suspenders: also point the endpoint
+      # at a loopback discard port so a future upstream default flip can't
+      # silently re-enable reporting. Verified dead at deploy via egress capture.
+      TEMPS_TELEMETRY: "0"
+      TEMPS_TELEMETRY_ENDPOINT: "http://127.0.0.1:9/disabled"
+    ports:
+      # Serve on the standard public ports the firewall opens (80/443) so that
+      # DNS + any client snippet never has to know the box's identity — a VPS
+      # swap is just an A-record repoint, no port reconfig.
+      # ponytail: confirm against Temps' Pingora/ACME binding on first boot —
+      # if the proxy wants to own :80/:443 itself, drop these maps. Base compose
+      # also publishes 3000/3443; the firewall leaves those closed, so the extra
+      # host bind is harmless. Finalized at deploy, not guessed here.
+      - "80:3000"
+      - "443:3443"
