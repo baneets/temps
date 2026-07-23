@@ -22,6 +22,7 @@ import {
   Circle,
   DollarSign,
   Minus,
+  Sparkles,
   TrendingDown,
   TrendingUp,
   Users,
@@ -30,6 +31,7 @@ import { ReactNode, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { MetricCard } from '../dashboard/MetricCard'
 import { DeploymentActivityGraph } from './DeploymentActivityGraph'
+import { PROJECT_TOUR_EVENT } from './ProjectTour'
 
 interface ProjectOverviewProps {
   project: ProjectResponse
@@ -316,7 +318,6 @@ export function ProjectOverview({
 
         <RevenueMetric project={project} />
 
-
         <Link to={`/projects/${project.slug}/errors`} className="h-full w-full">
           <MetricCard
             change={''}
@@ -338,6 +339,17 @@ export function ProjectOverview({
 
       <div className="mt-4 sm:mt-6">
         <DeploymentActivityGraph projectId={project.id} />
+      </div>
+
+      <div className="mt-4 flex justify-center sm:mt-6">
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new Event(PROJECT_TOUR_EVENT))}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <Sparkles className="size-3.5" />
+          Take a tour of your project
+        </button>
       </div>
     </>
   )
