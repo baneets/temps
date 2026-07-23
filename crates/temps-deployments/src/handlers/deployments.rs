@@ -9,7 +9,7 @@ use super::types::AppState;
 use axum::Router;
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Extension, Path, Query, State,
     },
     http::StatusCode,
@@ -1049,6 +1049,20 @@ struct ContainerLogParams {
     follow: bool,
 }
 
+/// Close a container-log WebSocket with an explicit `1000` (normal closure)
+/// code. `WebSocket::close()` sends a bare Close frame with no code, which
+/// browsers surface as an abnormal closure -- the frontend's reconnect logic
+/// only skips retrying on `event.code === 1000`, so a codeless close was
+/// silently treated as "try again".
+async fn send_close_normal(socket: &mut WebSocket, reason: &str) -> Result<(), axum::Error> {
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: reason.to_string().into(),
+        })))
+        .await
+}
+
 async fn handle_container_logs_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -1078,7 +1092,10 @@ async fn handle_container_logs_socket(
     {
         Ok(stream) => stream,
         Err(e) => {
-            error!("Failed to get container logs: {}", e);
+            error!(
+                "Failed to get logs for container {}: {}",
+                params.container_id, e
+            );
             let error_msg = serde_json::json!({
                 "error": "Failed to get container logs",
                 "detail": e.to_string()
@@ -1089,7 +1106,15 @@ async fn handle_container_logs_socket(
             {
                 error!("Failed to send error message over WebSocket: {}", e);
             }
-            let _ = socket.close().await;
+            // Close with an explicit normal-closure code (not `socket.close()`,
+            // which sends a bare Close frame with no code). The frontend only
+            // treats `event.code === 1000` as "don't reconnect" -- a codeless
+            // close reads as abnormal, and combined with the client resetting
+            // its retry counter on every successful re-open, that produced an
+            // infinite reconnect loop for containers whose `container_id` no
+            // longer resolves in Docker (e.g. long-lived rows pointing at a
+            // container Docker has since removed).
+            let _ = send_close_normal(&mut socket, "container logs unavailable").await;
             return;
         }
     };
@@ -1141,7 +1166,12 @@ async fn handle_container_logs_socket(
         "WebSocket connection closed for container {} logs",
         params.container_id
     );
-    let _ = socket.close().await;
+    // The Docker log stream ending here is expected -- e.g. an old/exited
+    // container has no more history to follow. A codeless close makes the
+    // frontend treat that as abnormal and reconnect forever, re-fetching the
+    // same already-exhausted log stream on every retry. See
+    // `send_close_normal`.
+    let _ = send_close_normal(&mut socket, "log stream ended").await;
 }
 
 /// Get logs for a container in an environment via WebSocket
@@ -1242,7 +1272,10 @@ async fn handle_filtered_container_logs_socket(
     {
         Ok(stream) => stream,
         Err(e) => {
-            error!("Failed to get container logs: {}", e);
+            error!(
+                "Failed to get container logs for environment {}: {}",
+                params.environment_id, e
+            );
             let error_msg = serde_json::json!({
                 "error": "Failed to get container logs",
                 "detail": e.to_string()
@@ -1253,7 +1286,9 @@ async fn handle_filtered_container_logs_socket(
             {
                 error!("Failed to send error message over WebSocket: {}", e);
             }
-            let _ = socket.close().await;
+            // See the comment in `handle_container_logs_socket`: a codeless
+            // close here caused an infinite client-side reconnect loop.
+            let _ = send_close_normal(&mut socket, "container logs unavailable").await;
             return;
         }
     };
@@ -1287,7 +1322,8 @@ async fn handle_filtered_container_logs_socket(
         "WebSocket connection closed for environment {} container logs",
         params.environment_id
     );
-    let _ = socket.close().await;
+    // See the comment in `handle_container_logs_socket`.
+    let _ = send_close_normal(&mut socket, "log stream ended").await;
 }
 
 /// Get jobs for a specific deployment
@@ -3052,6 +3088,190 @@ mod tests {
 
         // Cleanup
         cleanup_test_docker_container(&docker, &real_container_id).await;
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Regression test for the container-logs infinite-reconnect-loop bug:
+    /// when `deployment_containers.container_id` no longer resolves in
+    /// Docker (e.g. an old/removed container), the handler used to upgrade
+    /// the WebSocket and then close it with a codeless Close frame. The
+    /// frontend only treats `event.code === 1000` as "stop retrying", so a
+    /// codeless close read as abnormal and reconnected forever. This asserts
+    /// the handler now closes with an explicit normal-closure (1000) code.
+    #[tokio::test]
+    async fn test_container_logs_by_id_stale_container_closes_normally() {
+        let docker = match bollard::Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping test");
+                return;
+            }
+        };
+        if docker.ping().await.is_err() {
+            println!("Docker not available, skipping test");
+            return;
+        }
+
+        use axum::extract::Request;
+        use axum::middleware;
+        use sea_orm::{ActiveModelTrait, Set};
+        use temps_entities::{
+            deployment_containers as containers, deployments, environments, projects,
+        };
+
+        let test_db = TestDatabase::with_migrations()
+            .await
+            .expect("Failed to create test database");
+        let db = test_db.connection_arc();
+
+        let temp_dir = std::env::temp_dir().join(format!("test_ws_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
+
+        let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
+
+        let project = projects::ActiveModel {
+            name: Set("Test Project".to_string()),
+            slug: Set("test-project-stale".to_string()),
+            repo_name: Set("test-repo".to_string()),
+            repo_owner: Set("test-owner".to_string()),
+            directory: Set("/tmp/test-project".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Dockerfile),
+            ..Default::default()
+        }
+        .insert(&*db)
+        .await
+        .expect("Failed to create test project");
+
+        let subdomain = format!("test-env-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("Test Environment".to_string()),
+            slug: Set("test-env".to_string()),
+            subdomain: Set(subdomain.clone()),
+            host: Set(format!("{}.localhost", subdomain)),
+            upstreams: Set(UpstreamList::default()),
+            ..Default::default()
+        }
+        .insert(&*db)
+        .await
+        .expect("Failed to create test environment");
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set(format!("test-deployment-{}", uuid::Uuid::new_v4())),
+            state: Set("running".to_string()),
+            metadata: Set(Some(
+                temps_entities::deployments::DeploymentMetadata::default(),
+            )),
+            ..Default::default()
+        }
+        .insert(&*db)
+        .await
+        .expect("Failed to create test deployment");
+
+        let mut env_active: environments::ActiveModel = environment.into();
+        env_active.current_deployment_id = Set(Some(deployment.id));
+        let environment = env_active
+            .update(&*db)
+            .await
+            .expect("Failed to update environment with deployment");
+
+        // DB row for a container Docker no longer knows about -- simulates
+        // an old container that was since removed/recreated.
+        let now = chrono::Utc::now();
+        let stale_container_id = format!("stale-{}", uuid::Uuid::new_v4());
+        let container = containers::ActiveModel {
+            deployment_id: Set(deployment.id),
+            container_id: Set(stale_container_id.clone()),
+            container_name: Set("test-container".to_string()),
+            container_port: Set(8080),
+            image_name: Set(Some("alpine:latest".to_string())),
+            status: Set(Some("running".to_string())),
+            created_at: Set(now),
+            deployed_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&*db)
+        .await
+        .expect("Failed to create test container");
+
+        let auth_middleware = middleware::from_fn(
+            |mut req: Request, next: axum::middleware::Next| async move {
+                let auth_context = create_test_auth_context();
+                req.extensions_mut().insert(auth_context);
+                next.run(req).await
+            },
+        );
+
+        let app = Router::new()
+            .route(
+                "/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs",
+                get(get_container_logs_by_id),
+            )
+            .layer(auth_middleware)
+            .with_state(app_state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind");
+        let addr = listener.local_addr().expect("Failed to get local address");
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Server failed to start");
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let ws_url = format!(
+            "ws://{}/api/projects/{}/environments/{}/containers/{}/logs",
+            addr, project.id, environment.id, container.container_id
+        );
+
+        let (mut ws_stream, response) = connect_async(&ws_url)
+            .await
+            .expect("Failed to connect to WebSocket");
+        if response.status() == 401 {
+            panic!("WebSocket connection rejected with 401 Unauthorized - authentication failed!");
+        }
+
+        let mut close_code = None;
+        while let Some(result) = timeout(Duration::from_secs(5), ws_stream.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            match result {
+                Ok(WsMessage::Text(text)) => {
+                    println!("Received error message: {}", text);
+                    assert!(
+                        text.contains("Failed to get container logs"),
+                        "Expected the not-found error payload, got: '{}'",
+                        text
+                    );
+                }
+                Ok(WsMessage::Close(frame)) => {
+                    close_code = frame.map(|f| u16::from(f.code));
+                    break;
+                }
+                Err(e) => {
+                    panic!("WebSocket error: {}", e);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            close_code,
+            Some(1000),
+            "Handler must close with an explicit normal-closure (1000) code so \
+             the frontend doesn't misread a stale-container error as abnormal \
+             and reconnect forever"
+        );
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
