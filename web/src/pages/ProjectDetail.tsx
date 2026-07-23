@@ -45,6 +45,7 @@ import ProjectAiCrawlers from './ProjectAiCrawlers'
 import Traces from './Traces'
 import LogsList from './LogsList'
 import Metrics from './Metrics'
+import { ProjectTour } from '@/components/project/ProjectTour'
 import { ProjectAgentActivity } from './AiGateway'
 import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
 import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
@@ -326,6 +327,7 @@ export function ProjectDetail() {
                 </AlertDescription>
               </Alert>
             )}
+            <ProjectTour />
             <Routes>
               <Route
                 index

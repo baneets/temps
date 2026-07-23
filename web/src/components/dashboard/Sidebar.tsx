@@ -1024,7 +1024,10 @@ function ProjectNav({
             const hasSub = !!item.subItems?.length
             const splitRow = hasSub && item.navigateOnClick
             return (
-              <SidebarMenuItem key={item.title}>
+              <SidebarMenuItem
+                key={item.title}
+                data-tour={item.url.split('?')[0]}
+              >
                 {splitRow ? (
                   <SidebarMenuButton
                     asChild
